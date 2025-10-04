@@ -6,7 +6,10 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:images": "node test-simple.js",
+    "test:full": "node test-image-generation.js",
+    "test:comprehensive": "node test-comprehensive.js"
   },
   "dependencies": {
     "next": "15.5.4",

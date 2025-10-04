@@ -2,7 +2,7 @@
 
 ## Required Environment Variables
 
-Create a `.env.local` file in your project root and add the following API keys:
+Create a `.env` file in your project root and add the following API keys:
 
 ### Essential APIs for Storyboard Generation
 
@@ -10,10 +10,12 @@ Create a `.env.local` file in your project root and add the following API keys:
 ```bash
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
-- **Purpose**: Text analysis, story structure generation, prompt optimization
+- **Purpose**: Text analysis, story structure generation, prompt optimization, and image generation
 - **Get it**: https://makersuite.google.com/app/apikey
 - **Cost**: Free tier available, very affordable
-- **Model**: gemini-1.5-flash (fast and cost-effective)
+- **Models**: 
+  - gemini-2.0-flash (text generation)
+  - gemini-2.5-flash-image-preview (image generation)
 
 #### 2. ElevenLabs API (Audio generation)
 ```bash
@@ -43,33 +45,35 @@ NEXTAUTH_URL=http://localhost:3000
 For testing and development, start with:
 
 ```bash
-# .env.local
+# .env
 GEMINI_API_KEY=your_gemini_api_key_here
 ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 ```
 
 This will allow you to:
 1. Process text and generate story structures with Gemini
-2. Create narration audio with ElevenLabs
-3. Test the full storyboard generation pipeline
+2. Generate high-quality images with Gemini
+3. Create narration audio with ElevenLabs
+4. Test the full storyboard generation pipeline
 
 ## API Usage Tips
 
-1. **Start with Gemini**: Free tier available, easy to implement
+1. **Start with Gemini**: Free tier available, handles both text and images
 2. **Monitor costs**: Set usage limits in your API accounts
 3. **Test with small prompts**: Use the test prompts in the app
-4. **Audio generation**: ElevenLabs has a free tier with 10k characters/month
-5. **Voice selection**: Use child-friendly voices for educational content
+4. **Image generation**: Gemini image generation is included in the free tier
+5. **Audio generation**: ElevenLabs has a free tier with 10k characters/month
+6. **Voice selection**: Use child-friendly voices for educational content
 
 ## Next Steps
 
 1. Get a Gemini API key from Google AI Studio
 2. Get an ElevenLabs API key
-3. Add both to your `.env.local` file
+3. Add both to your `.env` file
 4. Test with the provided sample prompts
-5. Optionally generate audio for storyboard scenes
+5. Generate images and audio for storyboard scenes
 
 ## Available API Endpoints
 
-- `POST /api/generate-storyboard` - Generate storyboard structure with Gemini
+- `POST /api/generate-storyboard` - Generate complete storyboard with images and audio using Gemini
 - `POST /api/generate-audio` - Generate audio narration with ElevenLabs
