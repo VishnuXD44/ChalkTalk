@@ -21,17 +21,17 @@ body {
 }
 
 #game-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 100vh;
-  padding: 20px;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
 }
 
 #phaser-game {
-  border-radius: 12px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-  overflow: hidden;
+  width: 100%;
+  height: 100%;
   outline: none; /* Prevent focus outline */
 }
 

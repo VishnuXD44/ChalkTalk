@@ -4,22 +4,82 @@ export class ElevenLabsService {
   private apiKey: string
   private baseUrl = 'https://api.elevenlabs.io/v1'
   private audioManager: AudioContextManager
+  private lastRequestTime: number = 0
+  private requestQueue: Array<() => Promise<void>> = []
+  private isProcessingQueue: boolean = false
+  private minRequestInterval: number = 1000 // Minimum 1 second between requests
+  private isDisabled: boolean = false // Track if service is disabled due to auth errors
 
   constructor() {
-    this.apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY || ''
+    // Try both environment variable names for compatibility
+    this.apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY || process.env.ELEVENLABS_API_KEY || ''
     this.audioManager = AudioContextManager.getInstance()
     
+    console.log('🎤 ElevenLabs Service initialized')
+    console.log('🎤 API Key status:', this.getApiKeyStatus())
+    
     if (!this.apiKey) {
-      console.warn('ElevenLabs API key not found. Voice synthesis will be disabled.')
+      console.warn('❌ ElevenLabs API key not found. Voice synthesis will be disabled.')
+      console.info('💡 To enable voice synthesis, add your ElevenLabs API key to .env.local as:')
+      console.info('   NEXT_PUBLIC_ELEVENLABS_API_KEY=your_api_key_here')
+      console.info('   or')
+      console.info('   ELEVENLABS_API_KEY=your_api_key_here')
+    } else if (this.apiKey.length < 20) {
+      console.warn('⚠️ ElevenLabs API key appears to be invalid (too short). Voice synthesis may not work.')
+    } else {
+      console.log('✅ ElevenLabs API key found and appears valid')
     }
   }
 
-  async synthesizeSpeech(text: string, npcId: string): Promise<void> {
-    if (!this.apiKey) {
-      console.log('Voice synthesis disabled - no API key provided')
+  async synthesizeSpeech(text: string, npcId: string, isUserConversation: boolean = false, distance: number = 0): Promise<void> {
+    if (!this.apiKey || this.isDisabled) {
+      console.log('Voice synthesis disabled - no API key provided or service disabled due to auth errors')
       return
     }
 
+    // Queue the request to handle rate limiting
+    return new Promise((resolve, reject) => {
+      this.requestQueue.push(async () => {
+        try {
+          await this.processSpeechRequest(text, npcId, isUserConversation, distance)
+          resolve()
+        } catch (error) {
+          reject(error)
+        }
+      })
+      
+      this.processQueue()
+    })
+  }
+
+  private async processQueue(): Promise<void> {
+    if (this.isProcessingQueue || this.requestQueue.length === 0) {
+      return
+    }
+
+    this.isProcessingQueue = true
+
+    while (this.requestQueue.length > 0) {
+      const request = this.requestQueue.shift()
+      if (request) {
+        try {
+          await request()
+        } catch (error) {
+          console.error('Error processing speech request:', error)
+        }
+        
+        // Wait minimum interval between requests
+        const timeSinceLastRequest = Date.now() - this.lastRequestTime
+        if (timeSinceLastRequest < this.minRequestInterval) {
+          await new Promise(resolve => setTimeout(resolve, this.minRequestInterval - timeSinceLastRequest))
+        }
+      }
+    }
+
+    this.isProcessingQueue = false
+  }
+
+  private async processSpeechRequest(text: string, npcId: string, isUserConversation: boolean, distance: number): Promise<void> {
     try {
       // Get a voice ID based on the NPC (for consistency)
       const voiceId = this.getVoiceForNPC(npcId)
@@ -42,14 +102,25 @@ export class ElevenLabsService {
       })
 
       if (!response.ok) {
-        throw new Error(`ElevenLabs API error: ${response.status}`)
+        if (response.status === 401) {
+          console.warn('ElevenLabs API authentication failed. Please check your API key. Voice synthesis disabled.')
+          this.isDisabled = true
+          return
+        }
+        if (response.status === 429) {
+          console.warn('ElevenLabs API rate limit exceeded. Skipping voice synthesis.')
+          return
+        }
+        console.warn(`ElevenLabs API error: ${response.status}. Skipping voice synthesis.`)
+        return
       }
 
+      this.lastRequestTime = Date.now()
       const audioBlob = await response.blob()
       const audioUrl = URL.createObjectURL(audioBlob)
       
-      // Use the AudioContext manager for proper audio handling
-      await this.audioManager.playAudio(audioUrl)
+      // Use the AudioContext manager for proper audio handling with conversation type and distance
+      await this.audioManager.playAudio(audioUrl, isUserConversation, distance)
       
       // Clean up the URL after a delay (to allow audio to start playing)
       setTimeout(() => {
@@ -124,6 +195,28 @@ export class ElevenLabsService {
       console.error('ElevenLabs connection test failed:', error)
       return false
     }
+  }
+
+  // Method to check if service is disabled
+  isServiceDisabled(): boolean {
+    return this.isDisabled
+  }
+
+  // Method to re-enable service (useful if API key is updated)
+  reEnableService(): void {
+    this.isDisabled = false
+    console.log('ElevenLabs service re-enabled')
+  }
+
+  // Method to get API key status for debugging
+  getApiKeyStatus(): string {
+    if (!this.apiKey) {
+      return 'No API key provided'
+    }
+    if (this.apiKey.length < 20) {
+      return 'API key appears invalid (too short)'
+    }
+    return 'API key appears valid'
   }
 
   // Cleanup method to properly close AudioContext

@@ -29,14 +29,27 @@ export default function Home() {
         
         const config: Phaser.Types.Core.GameConfig = {
           type: Phaser.AUTO,
-          width: 1200,
-          height: 800,
+          width: window.innerWidth,
+          height: window.innerHeight,
           parent: gameRef.current,
           backgroundColor: '#2c3e50',
-          scene: GameScene
+          scene: GameScene,
+          scale: {
+            mode: Phaser.Scale.RESIZE,
+            autoCenter: Phaser.Scale.CENTER_BOTH
+          }
         }
 
         phaserGameRef.current = new Phaser.Game(config)
+        
+        // Handle window resize
+        const handleResize = () => {
+          if (phaserGameRef.current) {
+            phaserGameRef.current.scale.resize(window.innerWidth, window.innerHeight)
+          }
+        }
+        
+        window.addEventListener('resize', handleResize)
         
         // Set up the NPC interaction callback with proper timing
         const setupCallback = () => {
@@ -89,6 +102,8 @@ export default function Home() {
         phaserGameRef.current.destroy(true)
         phaserGameRef.current = null
       }
+      // Clean up resize listener
+      window.removeEventListener('resize', handleResize)
     }
   }, [isClient])
 
@@ -234,6 +249,9 @@ Generate a single, natural response that fits ${npcData.name}'s personality and 
       if (gameScene.showPlayerConversationMessage) {
         gameScene.showPlayerConversationMessage(npcData, response.trim())
       }
+      
+      // Voice synthesis is handled by GameScene.showPlayerConversationMessage
+      // No need to duplicate the call here
       
       // Update UI
       setNpcResponse(response)
