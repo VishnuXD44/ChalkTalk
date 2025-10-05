@@ -154,35 +154,98 @@ export default function Home() {
     setChatMessage('')
   }
 
+  const handleAIConversation = async (npcData: any) => {
+    console.log('Generating AI conversation for:', npcData.name)
+    
+    try {
+      const geminiService = new GeminiService()
+      
+      const response = await geminiService.generateDialogue(
+        npcData.prompt,
+        [],
+        ''
+      )
+      
+      // Update the game scene with the AI conversation
+      const gameScene = phaserGameRef.current?.scene.getScene('GameScene')
+      if (gameScene && gameScene.showAIConversation) {
+        gameScene.showAIConversation(npcData, response, npcData.isPlayerConversation, npcData.npc2Data)
+      }
+    } catch (error) {
+      console.error('Error generating AI conversation:', error)
+      // If AI fails, just end the conversation gracefully without showing hardcoded text
+      const gameScene = phaserGameRef.current?.scene.getScene('GameScene')
+      if (gameScene) {
+        if (npcData.isPlayerConversation) {
+          gameScene.endPlayerConversation()
+        } else {
+          gameScene.endConversation(npcData.id, npcData.npc2Data?.id || '')
+        }
+      }
+    }
+  }
+
   const handleGameChatMessage = async (message: string, npcData: any) => {
     console.log('handleGameChatMessage called with:', { message, npcData })
+    
+    // Handle different types of interactions
+    if (npcData.action === 'generateConversation') {
+      await handleAIConversation(npcData)
+      return
+    }
+    
     if (!message.trim() || isTyping) return
 
     console.log('Starting Gemini API call...')
     setIsTyping(true)
     try {
-      const geminiService = new GeminiService()
-      
-      // Create personality context from the NPC's description and traits
-      const personalityContext = `You are a ${npcData.description}. Your personality traits are: ${npcData.traits.join(', ')}. ${npcData.personality}. Respond in character as this NPC would. Keep responses conversational and 1-2 sentences.`
-      
-      // Get conversation history for context
-      const conversationHistory = npcData.dialogue ? npcData.dialogue.slice(-6) : [] // Last 6 messages for context
-      
-      const response = await geminiService.generateDialogue(
-        personalityContext,
-        conversationHistory,
-        message
-      )
-      
-      // Update the game scene with the AI response
       const gameScene = phaserGameRef.current?.scene.getScene('GameScene')
-      if (gameScene && gameScene.receiveAIResponse) {
-        gameScene.receiveAIResponse(npcData.id, response)
+      if (!gameScene) return
+
+      // Add player message to conversation history
+      if (npcData.conversationState) {
+        npcData.conversationState.conversationHistory.push(`Player: "${message}"`)
+      }
+
+      // Generate AI response based on conversation history
+      const history = npcData.conversationState?.conversationHistory.slice(-4).join('\n') || ''
+      
+      const prompt = `Generate a natural response for ${npcData.name} in this conversation with the player. 
+
+${npcData.name} is a ${npcData.description} with personality: ${npcData.personality}
+
+Conversation so far:
+${history}
+
+Player just said: "${message}"
+
+Generate a single, natural response that fits ${npcData.name}'s personality and continues the conversation naturally. Keep it conversational and 1-2 sentences maximum. Just return the response text, nothing else.`
+
+      const geminiService = new GeminiService()
+      const response = await geminiService.generateDialogue(prompt, [], '')
+      
+      // Add AI response to conversation history
+      if (npcData.conversationState) {
+        npcData.conversationState.conversationHistory.push(`${npcData.name}: "${response.trim()}"`)
+        npcData.conversationState.messageCount++
       }
       
-      // Also update the UI response
+      // Update the game scene with the AI response
+      if (gameScene.showPlayerConversationMessage) {
+        gameScene.showPlayerConversationMessage(npcData, response.trim())
+      }
+      
+      // Update UI
       setNpcResponse(response)
+      
+      // Check if conversation should end
+      if (npcData.conversationState && npcData.conversationState.messageCount >= npcData.conversationState.maxMessages) {
+        setTimeout(() => {
+          if (gameScene.endPlayerConversation) {
+            gameScene.endPlayerConversation()
+          }
+        }, 3000)
+      }
       
     } catch (error) {
       console.error('Error getting NPC response:', error)
@@ -190,8 +253,8 @@ export default function Home() {
       
       // Show error in game
       const gameScene = phaserGameRef.current?.scene.getScene('GameScene')
-      if (gameScene && gameScene.receiveAIResponse) {
-        gameScene.receiveAIResponse(npcData.id, errorResponse)
+      if (gameScene && gameScene.showPlayerConversationMessage) {
+        gameScene.showPlayerConversationMessage(npcData, errorResponse)
       }
       
       setNpcResponse(errorResponse)

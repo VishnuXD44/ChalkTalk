@@ -1,4 +1,5 @@
 // Phaser will be imported dynamically in the main component
+import { GeminiService } from '../services/GeminiService'
 
 export function createGameScene(Phaser: any) {
   return class GameScene extends Phaser.Scene {
@@ -8,10 +9,17 @@ export function createGameScene(Phaser: any) {
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys
   private player?: Phaser.GameObjects.Rectangle
   private wasd?: any
-  private proximityDistance = 80
+  private proximityDistance = 100 // Increased for testing
   private onNPCInteractionCallback?: (npc: any) => void
   private activeChatNPC?: string // Track which NPC is currently being chatted with
-  private minDistance = 60 // Minimum distance between NPCs and player
+  private minDistance = 45 // Minimum distance between NPCs and player
+  private npcCollisionRadius = 25 // NPC collision radius
+  private playerCollisionRadius = 20 // Player collision radius
+  private collisionPadding = 5 // Extra padding for smooth collision response
+  private playerConversationState: 'idle' | 'approaching' | 'talking' | 'exiting' = 'idle'
+  private playerConversationPartner?: string
+  private conversationEntryTimer?: number
+  private conversationExitTimer?: number
 
   constructor() {
     super({ key: 'GameScene' })
@@ -31,8 +39,8 @@ export function createGameScene(Phaser: any) {
     this.player = this.add.rectangle(100, 100, 30, 30, 0xffffff)
     this.player.setStrokeStyle(2, 0x000000)
     
-    // Create some random colored squares (NPCs)
-    this.createRandomNPCs()
+    // Create NPCs with different personalities
+    this.createPersonalityNPCs()
 
     // Set up input using the centralized method
     this.setupBasicKeyboardHandlers()
@@ -70,113 +78,1053 @@ export function createGameScene(Phaser: any) {
 
     const speed = 200
 
-    // Player movement with WASD and Arrow Keys
-    if (this.cursors.left.isDown || this.wasd.A.isDown) {
-      this.player.x -= speed * this.game.loop.delta / 1000
-    }
-    if (this.cursors.right.isDown || this.wasd.D.isDown) {
-      this.player.x += speed * this.game.loop.delta / 1000
-    }
-    if (this.cursors.up.isDown || this.wasd.W.isDown) {
-      this.player.y -= speed * this.game.loop.delta / 1000
-    }
-    if (this.cursors.down.isDown || this.wasd.S.isDown) {
-      this.player.y += speed * this.game.loop.delta / 1000
+    // Player movement with WASD and Arrow Keys (only if not talking)
+    if (this.playerConversationState === 'idle') {
+      if (this.cursors.left.isDown || this.wasd.A.isDown) {
+        this.player.x -= speed * this.game.loop.delta / 1000
+      }
+      if (this.cursors.right.isDown || this.wasd.D.isDown) {
+        this.player.x += speed * this.game.loop.delta / 1000
+      }
+      if (this.cursors.up.isDown || this.wasd.W.isDown) {
+        this.player.y -= speed * this.game.loop.delta / 1000
+      }
+      if (this.cursors.down.isDown || this.wasd.S.isDown) {
+        this.player.y += speed * this.game.loop.delta / 1000
+      }
+    } else {
+      // Debug: Log when player movement is blocked
+      if (this.cursors.left.isDown || this.wasd.A.isDown || 
+          this.cursors.right.isDown || this.wasd.D.isDown ||
+          this.cursors.up.isDown || this.wasd.W.isDown ||
+          this.cursors.down.isDown || this.wasd.S.isDown) {
+        console.log('Player movement blocked - conversation state:', this.playerConversationState)
+      }
     }
 
-    // Keep player within bounds
-    this.player.x = Phaser.Math.Clamp(this.player.x, 15, 1185)
-    this.player.y = Phaser.Math.Clamp(this.player.y, 15, 785)
+    // Keep player within bounds with proper padding
+    const playerBoundsPadding = this.playerCollisionRadius + this.collisionPadding
+    this.player.x = Phaser.Math.Clamp(this.player.x, playerBoundsPadding, 1200 - playerBoundsPadding)
+    this.player.y = Phaser.Math.Clamp(this.player.y, playerBoundsPadding, 800 - playerBoundsPadding)
 
-    // Prevent player from colliding with NPCs
+    // Prevent collisions
     this.preventPlayerCollision()
+    this.preventNPCCollisions()
+
+    // Update NPC behaviors
+    this.updateNPCBehaviors()
 
     // Check proximity to NPCs
     this.checkNPCProximity()
+    
+    // Update conversation state timers
+    this.updateConversationTimers()
   }
 
-  createRandomNPCs() {
-    const colors = [
-      0xff6b6b, // Red
-      0x4ecdc4, // Teal
-      0x45b7d1, // Blue
-      0x96ceb4, // Green
-      0xfeca57, // Yellow
-      0xff9ff3, // Pink
-      0x54a0ff, // Light Blue
-      0xff7675, // Coral
-      0x74b9ff, // Sky Blue
-      0xa29bfe, // Purple
-      0xfd79a8, // Hot Pink
-      0xfdcb6e, // Orange
-      0x6c5ce7, // Violet
-      0x00b894, // Emerald
-      0xe17055  // Orange Red
+  private updateConversationTimers() {
+    const currentTime = this.time.now
+    
+    // Update exit timer
+    if (this.playerConversationState === 'exiting' && this.conversationExitTimer) {
+      if (currentTime >= this.conversationExitTimer) {
+        this.exitConversationState()
+      }
+    }
+    
+    // Update entry timer (if needed for delayed entry)
+    if (this.playerConversationState === 'approaching' && this.conversationEntryTimer) {
+      if (currentTime >= this.conversationEntryTimer) {
+        // Entry timer expired - could trigger automatic conversation start
+        // For now, we'll just clear the timer
+        this.conversationEntryTimer = undefined
+      }
+    }
+  }
+
+  updateNPCBehaviors() {
+    const currentTime = this.time.now
+
+    this.npcs.forEach((npc, npcId) => {
+      const npcData = this.npcData.get(npcId)
+      if (!npcData) return
+
+      // Process handshake responses
+      this.processHandshakeResponse(npcData, currentTime)
+
+      // Update NPC movement
+      this.updateNPCMovement(npc, npcData, currentTime)
+
+      // Check for NPC-to-NPC interactions (only if idle)
+      if (npcData.handshakeState === 'idle') {
+        this.checkNPCInteractions(npc, npcData, currentTime)
+      }
+    })
+  }
+
+  updateNPCMovement(npc: Phaser.GameObjects.Rectangle, npcData: any, currentTime: number) {
+    // Skip movement if NPC is in conversation
+    if (npcData.handshakeState === 'conversing') {
+      npcData.isMoving = false
+      return
+    }
+
+    // Update movement timer
+    npcData.moveTimer += this.game.loop.delta
+
+    // If movement duration is over, choose a new direction
+    if (npcData.moveTimer >= npcData.moveDuration) {
+      npcData.moveTimer = 0
+      npcData.moveDuration = Phaser.Math.Between(2000, 5000)
+
+      // Choose a new random direction
+      const angle = Phaser.Math.Between(0, 360) * (Math.PI / 180)
+      npcData.moveDirection.x = Math.cos(angle)
+      npcData.moveDirection.y = Math.sin(angle)
+      npcData.isMoving = true
+    }
+
+    // Move the NPC if it's supposed to be moving
+    if (npcData.isMoving) {
+      const deltaTime = this.game.loop.delta / 1000
+      // Use container position if available, otherwise use NPC position
+      const currentX = npcData.container ? npcData.container.x : npc.x
+      const currentY = npcData.container ? npcData.container.y : npc.y
+      const newX = currentX + (npcData.moveDirection.x * npcData.moveSpeed * deltaTime)
+      const newY = currentY + (npcData.moveDirection.y * npcData.moveSpeed * deltaTime)
+      
+      // Check bounds and collision with other NPCs
+      if (this.isValidNPCPosition(newX, newY, npcData.id)) {
+        // Move the container (which moves both NPC and label together)
+        if (npcData.container) {
+          npcData.container.x = newX
+          npcData.container.y = newY
+        } else {
+          // Fallback: move individual NPC and label
+          npc.x = newX
+          npc.y = newY
+          if (npcData.label) {
+            npcData.label.x = newX
+            npcData.label.y = newY - 25
+          }
+        }
+      } else {
+        // Hit a boundary or another NPC, choose a new direction
+        npcData.moveTimer = npcData.moveDuration // Force new direction
+      }
+    }
+  }
+
+
+  isValidNPCPosition(x: number, y: number, excludeId: string): boolean {
+    // Check bounds with proper padding
+    const boundsPadding = this.npcCollisionRadius + this.collisionPadding
+    if (x < boundsPadding || x > 1200 - boundsPadding || y < boundsPadding || y > 800 - boundsPadding) {
+      return false
+    }
+    
+    // Check collision with player
+    if (this.player) {
+      const distanceToPlayer = Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y)
+      const requiredDistance = this.npcCollisionRadius + this.playerCollisionRadius + this.collisionPadding
+      if (distanceToPlayer < requiredDistance) {
+        return false
+      }
+    }
+    
+    // Check collision with other NPCs
+    for (const [npcId, otherNpc] of this.npcs) {
+      if (npcId === excludeId) continue
+      
+      // Get the actual position of the other NPC (container or individual)
+      const otherNpcData = this.npcData.get(npcId)
+      const otherX = otherNpcData?.container ? otherNpcData.container.x : otherNpc.x
+      const otherY = otherNpcData?.container ? otherNpcData.container.y : otherNpc.y
+      
+      const distance = Phaser.Math.Distance.Between(x, y, otherX, otherY)
+      const requiredDistance = (this.npcCollisionRadius * 2) + this.collisionPadding
+      if (distance < requiredDistance) {
+        return false
+      }
+    }
+    
+    return true
+  }
+
+  checkNPCInteractions(npc: Phaser.GameObjects.Rectangle, npcData: any, currentTime: number) {
+    // Skip if NPC is already in a handshake process or conversation
+    if (npcData.handshakeState !== 'idle') {
+      return
+    }
+    
+    // Check if enough time has passed since last interaction
+    if (currentTime - npcData.lastInteraction < npcData.interactionCooldown) {
+      return
+    }
+    
+    // Find nearby NPCs
+    let closestNPC: { id: string; npc: Phaser.GameObjects.Rectangle; distance: number } | null = null
+    
+    this.npcs.forEach((otherNpc, otherId) => {
+      if (otherId === npcData.id) return
+      
+      const otherNpcData = this.npcData.get(otherId)
+      if (!otherNpcData) return
+      
+      // Skip if other NPC is already in a handshake process
+      if (otherNpcData.handshakeState !== 'idle') {
+        return
+      }
+      
+      // Get actual positions (container or individual)
+      const currentX = npcData.container ? npcData.container.x : npc.x
+      const currentY = npcData.container ? npcData.container.y : npc.y
+      const otherX = otherNpcData.container ? otherNpcData.container.x : otherNpc.x
+      const otherY = otherNpcData.container ? otherNpcData.container.y : otherNpc.y
+      
+      const distance = Phaser.Math.Distance.Between(currentX, currentY, otherX, otherY)
+      if (distance <= 80 && (!closestNPC || distance < closestNPC.distance)) {
+        closestNPC = { id: otherId, npc: otherNpc, distance }
+      }
+    })
+    
+    // If there's a nearby NPC, initiate handshake
+    if (closestNPC) {
+      this.initiateHandshake(npcData.id, closestNPC.id)
+      npcData.lastInteraction = currentTime
+    }
+  }
+
+
+  initiateHandshake(initiatorId: string, targetId: string) {
+    const initiatorData = this.npcData.get(initiatorId)
+    const targetData = this.npcData.get(targetId)
+    
+    if (!initiatorData || !targetData) return
+    
+    // Set handshake states
+    initiatorData.handshakeState = 'requesting'
+    initiatorData.handshakePartner = targetId
+    initiatorData.handshakeRequestTimer = 0
+    
+    targetData.handshakeState = 'requested'
+    targetData.handshakePartner = initiatorId
+    targetData.handshakeRequestTimer = 0
+    
+    // Show handshake request
+    this.showHandshakeRequest(initiatorData, targetData)
+    
+    console.log(`${initiatorData.name} is requesting a handshake from ${targetData.name}`)
+  }
+
+  showHandshakeRequest(initiatorData: any, targetData: any) {
+    // Show simple greeting request above the target NPC
+    const targetX = targetData.container ? targetData.container.x : targetData.sprite.x
+    const targetY = targetData.container ? targetData.container.y : targetData.sprite.y
+    
+    const requestBubble = this.add.container(targetX, targetY - 60)
+    
+    // Background
+    const bg = this.add.rectangle(0, 0, 150, 25, 0x000000, 0.9)
+    bg.setStrokeStyle(2, 0xffff00) // Yellow border for handshake request
+    
+    // Generate AI greeting
+    this.generateHandshakeGreeting(initiatorData, targetData, requestBubble, bg)
+    
+    // Store reference for cleanup
+    targetData.handshakeRequestBubble = requestBubble
+    
+    // Animate the request
+    requestBubble.setScale(0.5)
+    this.tweens.add({
+      targets: requestBubble,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 300,
+      ease: 'Back.easeOut'
+    })
+  }
+
+  async generateHandshakeGreeting(initiatorData: any, targetData: any, requestBubble: any, bg: any) {
+    try {
+      // Generate AI greeting for handshake request
+      const prompt = `Generate a short, friendly greeting (1-3 words) that ${initiatorData.name} would say when approaching ${targetData.name} for a conversation. 
+
+${initiatorData.name} is a ${initiatorData.description} with personality: ${initiatorData.personality}
+${targetData.name} is a ${targetData.description} with personality: ${targetData.personality}
+
+Make it natural, personality-appropriate, and brief. Just return the greeting text, nothing else.`
+
+      const geminiService = new GeminiService()
+      const greeting = await geminiService.generateDialogue(prompt, [], '')
+      
+      // Create text with AI-generated greeting
+      const text = this.add.text(0, 0, greeting.trim(), {
+        fontSize: '10px',
+        color: '#ffffff',
+        fontFamily: 'Arial'
+      })
+      text.setOrigin(0.5)
+      
+      requestBubble.add([bg, text])
+    } catch (error) {
+      console.error('Error generating handshake greeting:', error)
+      // Fallback to a simple generic greeting if AI fails
+      const text = this.add.text(0, 0, "Hello!", {
+        fontSize: '10px',
+        color: '#ffffff',
+        fontFamily: 'Arial'
+      })
+      text.setOrigin(0.5)
+      
+      requestBubble.add([bg, text])
+    }
+  }
+
+  processHandshakeResponse(npcData: any, currentTime: number) {
+    if (npcData.handshakeState === 'requested') {
+      npcData.handshakeRequestTimer += this.game.loop.delta
+      
+      // Time's up - auto-reject
+      if (npcData.handshakeRequestTimer >= npcData.handshakeRequestDuration) {
+        this.rejectHandshake(npcData.id)
+        return
+      }
+      
+      // Make decision based on personality
+      const shouldAccept = this.shouldAcceptHandshake(npcData)
+      
+      if (shouldAccept) {
+        this.acceptHandshake(npcData.id)
+      } else {
+        this.rejectHandshake(npcData.id)
+      }
+    }
+  }
+
+  shouldAcceptHandshake(npcData: any): boolean {
+    // Personality-based handshake acceptance logic
+    const personality = npcData.personality.toLowerCase()
+    
+    // Warriors are more likely to accept challenges
+    if (personality.includes('warrior') || personality.includes('battle')) {
+      return Math.random() < 0.8
+    }
+    
+    // Scholars are curious and likely to accept
+    if (personality.includes('scholar') || personality.includes('knowledge')) {
+      return Math.random() < 0.9
+    }
+    
+    // Mystics are mysterious but sometimes accept
+    if (personality.includes('mystic') || personality.includes('fortune')) {
+      return Math.random() < 0.6
+    }
+    
+    // Gardeners are friendly and likely to accept
+    if (personality.includes('gardener') || personality.includes('nature')) {
+      return Math.random() < 0.85
+    }
+    
+    // Merchants are business-minded and selective
+    if (personality.includes('merchant') || personality.includes('business')) {
+      return Math.random() < 0.7
+    }
+    
+    // Artists are emotional and variable
+    if (personality.includes('artist') || personality.includes('creative')) {
+      return Math.random() < 0.75
+    }
+    
+    // Sailors are adventurous and likely to accept
+    if (personality.includes('sailor') || personality.includes('adventure')) {
+      return Math.random() < 0.8
+    }
+    
+    // Blacksmiths are practical and selective
+    if (personality.includes('blacksmith') || personality.includes('craft')) {
+      return Math.random() < 0.65
+    }
+    
+    // Night owls are contemplative and selective
+    if (personality.includes('night') || personality.includes('philosopher')) {
+      return Math.random() < 0.6
+    }
+    
+    // Nobles are refined and selective
+    if (personality.includes('noble') || personality.includes('refined')) {
+      return Math.random() < 0.7
+    }
+    
+    // Default acceptance rate
+    return Math.random() < 0.7
+  }
+
+  acceptHandshake(npcId: string) {
+    const npcData = this.npcData.get(npcId)
+    const partnerId = npcData.handshakePartner
+    const partnerData = this.npcData.get(partnerId)
+    
+    if (!npcData || !partnerData) return
+    
+    // Update states
+    npcData.handshakeState = 'conversing'
+    partnerData.handshakeState = 'conversing'
+    
+    // Clean up request bubbles
+    this.cleanupHandshakeRequest(npcData)
+    this.cleanupHandshakeRequest(partnerData)
+    
+    // Start conversation flow
+    this.startConversationFlow(npcData, partnerData)
+    
+    console.log(`${npcData.name} accepted handshake from ${partnerData.name}`)
+  }
+
+  rejectHandshake(npcId: string) {
+    const npcData = this.npcData.get(npcId)
+    const partnerId = npcData.handshakePartner
+    const partnerData = this.npcData.get(partnerId)
+    
+    if (!npcData || !partnerData) return
+    
+    // Update states
+    npcData.handshakeState = 'rejected'
+    partnerData.handshakeState = 'rejected'
+    
+    // Clean up request bubbles
+    this.cleanupHandshakeRequest(npcData)
+    this.cleanupHandshakeRequest(partnerData)
+    
+    // Show rejection
+    this.showHandshakeRejection(npcData, partnerData)
+    
+    // Reset states after a delay
+    this.time.delayedCall(2000, () => {
+      this.resetHandshakeState(npcData.id)
+      this.resetHandshakeState(partnerData.id)
+    })
+    
+    console.log(`${npcData.name} rejected handshake from ${partnerData.name}`)
+  }
+
+  cleanupHandshakeRequest(npcData: any) {
+    if (npcData.handshakeRequestBubble) {
+      npcData.handshakeRequestBubble.destroy()
+      npcData.handshakeRequestBubble = null
+    }
+  }
+
+
+  showHandshakeRejection(npcData: any, partnerData: any) {
+    const npcX = npcData.container ? npcData.container.x : npcData.sprite.x
+    const npcY = npcData.container ? npcData.container.y : npcData.sprite.y
+    
+    const rejectionBubble = this.add.container(npcX, npcY - 60)
+    
+    // Background
+    const bg = this.add.rectangle(0, 0, 100, 25, 0x000000, 0.9)
+    bg.setStrokeStyle(2, 0xff0000) // Red border for rejection
+    
+    // Simple rejection
+    // Generate AI rejection message
+    this.generateHandshakeRejection(npcData, rejectionBubble, bg)
+    
+    // Animate and destroy
+    rejectionBubble.setScale(0.5)
+    this.tweens.add({
+      targets: rejectionBubble,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 300,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.time.delayedCall(1500, () => {
+          rejectionBubble.destroy()
+        })
+      }
+    })
+  }
+
+  async generateHandshakeRejection(npcData: any, rejectionBubble: any, bg: any) {
+    try {
+      // Generate AI rejection message
+      const prompt = `Generate a short, polite rejection message (1-3 words) that ${npcData.name} would say when declining a conversation request.
+
+${npcData.name} is a ${npcData.description} with personality: ${npcData.personality}
+
+Make it natural, personality-appropriate, and brief. Just return the rejection text, nothing else.`
+
+      const geminiService = new GeminiService()
+      const rejection = await geminiService.generateDialogue(prompt, [], '')
+      
+      // Create text with AI-generated rejection
+      const text = this.add.text(0, 0, rejection.trim(), {
+        fontSize: '10px',
+        color: '#ff0000',
+        fontFamily: 'Arial'
+      })
+      text.setOrigin(0.5)
+      
+      rejectionBubble.add([bg, text])
+    } catch (error) {
+      console.error('Error generating handshake rejection:', error)
+      // Fallback to a simple generic rejection if AI fails
+      const text = this.add.text(0, 0, "Maybe later.", {
+        fontSize: '10px',
+        color: '#ff0000',
+        fontFamily: 'Arial'
+      })
+      text.setOrigin(0.5)
+      
+      rejectionBubble.add([bg, text])
+    }
+  }
+
+  startConversationFlow(npc1Data: any, npc2Data: any) {
+    // Start a message-by-message conversation between NPCs
+    this.startMessageByMessageConversation(npc1Data, npc2Data)
+    
+    console.log(`${npc1Data.name} and ${npc2Data.name} are starting a conversation!`)
+  }
+
+  startMessageByMessageConversation(npc1Data: any, npc2Data: any) {
+    // Initialize conversation state
+    npc1Data.conversationState = {
+      partner: npc2Data.id,
+      messageCount: 0,
+      maxMessages: Phaser.Math.Between(3, 5), // 3-5 message exchanges
+      conversationHistory: []
+    }
+    
+    npc2Data.conversationState = {
+      partner: npc1Data.id,
+      messageCount: 0,
+      maxMessages: npc1Data.conversationState.maxMessages,
+      conversationHistory: []
+    }
+    
+    // Start with an intro message from the initiator
+    this.sendConversationMessage(npc1Data, npc2Data, true)
+  }
+
+  async sendConversationMessage(speakerData: any, listenerData: any, isFirstMessage: boolean = false) {
+    try {
+      let prompt: string
+      
+      if (isFirstMessage) {
+        // Use predefined intro messages for the first message
+        const introMessages = this.getIntroMessages(speakerData, listenerData)
+        const selectedIntro = introMessages[Phaser.Math.Between(0, introMessages.length - 1)]
+        
+        // Show the intro message immediately
+        this.showConversationMessage(speakerData, listenerData, selectedIntro)
+        
+        // Add to conversation history
+        speakerData.conversationState.conversationHistory.push(`${speakerData.name}: "${selectedIntro}"`)
+        listenerData.conversationState.conversationHistory.push(`${speakerData.name}: "${selectedIntro}"`)
+        
+        // Schedule the response
+        this.time.delayedCall(2000, () => {
+          this.sendConversationMessage(listenerData, speakerData, false)
+        })
+      } else {
+        // Generate AI response based on conversation history
+        const history = speakerData.conversationState.conversationHistory.slice(-4).join('\n') // Last 4 messages for context
+        
+        prompt = `Generate a natural response for ${speakerData.name} in this conversation. 
+
+${speakerData.name} is a ${speakerData.description} with personality: ${speakerData.personality}
+${listenerData.name} is a ${listenerData.description} with personality: ${listenerData.personality}
+
+Conversation so far:
+${history}
+
+Generate a single, natural response that fits ${speakerData.name}'s personality and continues the conversation naturally. Keep it conversational and 1-2 sentences maximum. Just return the response text, nothing else.`
+
+        const geminiService = new GeminiService()
+        const response = await geminiService.generateDialogue(prompt, [], '')
+        
+        // Show the AI-generated response
+        this.showConversationMessage(speakerData, listenerData, response.trim())
+        
+        // Add to conversation history
+        const message = `${speakerData.name}: "${response.trim()}"`
+        speakerData.conversationState.conversationHistory.push(message)
+        listenerData.conversationState.conversationHistory.push(message)
+        
+        // Check if conversation should continue
+        speakerData.conversationState.messageCount++
+        
+        if (speakerData.conversationState.messageCount < speakerData.conversationState.maxMessages) {
+          // Schedule next message from the other NPC
+          this.time.delayedCall(Phaser.Math.Between(2000, 4000), () => {
+            this.sendConversationMessage(listenerData, speakerData, false)
+          })
+        } else {
+          // End conversation
+          this.time.delayedCall(3000, () => {
+            this.endConversation(speakerData.id, listenerData.id)
+          })
+        }
+      }
+    } catch (error) {
+      console.error('Error generating conversation message:', error)
+      // End conversation gracefully if AI fails
+      this.endConversation(speakerData.id, listenerData.id)
+    }
+  }
+
+  getIntroMessages(speakerData: any, listenerData: any): string[] {
+    // Predefined intro messages based on personality types
+    const personality = speakerData.personality.toLowerCase()
+    const listenerName = listenerData.name
+    
+    if (personality.includes('warrior')) {
+      return [
+        `Greetings, ${listenerName}! What brings you here?`,
+        `${listenerName}, good to see you. Any news from the battlefield?`,
+        `Well met, ${listenerName}. How goes your training?`,
+        `Ah, ${listenerName}! Ready for some action?`
+      ]
+    } else if (personality.includes('scholar')) {
+      return [
+        `${listenerName}, what knowledge do you seek today?`,
+        `Ah, ${listenerName}! Have you discovered anything interesting?`,
+        `Greetings, ${listenerName}. What mysteries shall we explore?`,
+        `${listenerName}, I've been studying something fascinating...`
+      ]
+    } else if (personality.includes('mystic')) {
+      return [
+        `${listenerName}, the stars have been whispering about you...`,
+        `Greetings, ${listenerName}. The cosmic energies are strong today.`,
+        `${listenerName}, I sense something in your aura...`,
+        `Ah, ${listenerName}. The fates have brought us together.`
+      ]
+    } else if (personality.includes('merchant')) {
+      return [
+        `${listenerName}, my friend! What can I interest you in today?`,
+        `Ah, ${listenerName}! I have some excellent deals for you.`,
+        `Greetings, ${listenerName}. Business is good, I hope?`,
+        `${listenerName}, I've got something special just for you...`
+      ]
+    } else if (personality.includes('gardener')) {
+      return [
+        `${listenerName}, how lovely to see you! How does your garden grow?`,
+        `Greetings, ${listenerName}. The flowers are blooming beautifully today.`,
+        `${listenerName}, I've been tending to some new plants...`,
+        `Ah, ${listenerName}! Nature has been kind to us lately.`
+      ]
+    } else if (personality.includes('artist')) {
+      return [
+        `${listenerName}, you inspire me! What's your latest creation?`,
+        `Greetings, ${listenerName}. The world needs more beauty like yours.`,
+        `${listenerName}, I've been working on something new...`,
+        `Ah, ${listenerName}! Art flows through everything we do.`
+      ]
+    } else if (personality.includes('sailor')) {
+      return [
+        `${listenerName}, ahoy! What winds bring you here?`,
+        `Greetings, ${listenerName}. The seas have been kind lately.`,
+        `${listenerName}, I've tales of distant shores to share...`,
+        `Ah, ${listenerName}! Adventure calls to us both.`
+      ]
+    } else if (personality.includes('blacksmith')) {
+      return [
+        `${listenerName}, good to see you! Need anything forged?`,
+        `Greetings, ${listenerName}. The forge has been busy today.`,
+        `${listenerName}, I've been working on some new techniques...`,
+        `Ah, ${listenerName}! Steel and fire await.`
+      ]
+    } else if (personality.includes('noble')) {
+      return [
+        `${listenerName}, what a pleasure to see you again.`,
+        `Greetings, ${listenerName}. I trust you're well?`,
+        `${listenerName}, I've been meaning to speak with you...`,
+        `Ah, ${listenerName}! Your presence brightens the day.`
+      ]
+    } else {
+      return [
+        `${listenerName}, good to see you!`,
+        `Greetings, ${listenerName}. How are you?`,
+        `${listenerName}, what brings you here?`,
+        `Ah, ${listenerName}! Nice to meet you.`
+      ]
+    }
+  }
+
+  showConversationMessage(speakerData: any, listenerData: any, message: string) {
+    // Create or update conversation bubble
+    const npc1X = speakerData.container ? speakerData.container.x : speakerData.sprite.x
+    const npc1Y = speakerData.container ? speakerData.container.y : speakerData.sprite.y
+    const npc2X = listenerData.container ? listenerData.container.x : listenerData.sprite.x
+    const npc2Y = listenerData.container ? listenerData.container.y : listenerData.sprite.y
+    
+    const midX = (npc1X + npc2X) / 2
+    const midY = Math.min(npc1Y, npc2Y) - 60
+    
+    // Destroy existing conversation bubble if it exists
+    if (speakerData.conversationBubble) {
+      speakerData.conversationBubble.destroy()
+    }
+    if (listenerData.conversationBubble) {
+      listenerData.conversationBubble.destroy()
+    }
+    
+    const conversationBubble = this.add.container(midX, midY)
+    
+    // Background
+    const bg = this.add.rectangle(0, 0, 400, 60, 0x000000, 0.9)
+    bg.setStrokeStyle(2, 0x00ff00) // Green border for NPC conversations
+    
+    // Text
+    const text = this.add.text(0, 0, message, {
+      fontSize: '12px',
+      color: '#ffffff',
+      fontFamily: 'Arial',
+      wordWrap: { width: 380, useAdvancedWrap: true },
+      align: 'center'
+    })
+    text.setOrigin(0.5)
+    
+    conversationBubble.add([bg, text])
+    
+    // Store reference for cleanup
+    speakerData.conversationBubble = conversationBubble
+    listenerData.conversationBubble = conversationBubble
+  }
+
+
+  showConversationBubble(npc1Data: any, npc2Data: any, conversation: string, isPlayerConversation: boolean = false) {
+    let midX: number, midY: number
+    
+    if (isPlayerConversation) {
+      // Position conversation bubble between player and NPC
+      const npcX = npc1Data.container ? npc1Data.container.x : npc1Data.sprite.x
+      const npcY = npc1Data.container ? npc1Data.container.y : npc1Data.sprite.y
+      const playerX = this.player!.x
+      const playerY = this.player!.y
+      
+      midX = (npcX + playerX) / 2
+      midY = Math.min(npcY, playerY) - 80
+    } else {
+      // Position conversation bubble between two NPCs
+      const npc1X = npc1Data.container ? npc1Data.container.x : npc1Data.sprite.x
+      const npc1Y = npc1Data.container ? npc1Data.container.y : npc1Data.sprite.y
+      const npc2X = npc2Data.container ? npc2Data.container.x : npc2Data.sprite.x
+      const npc2Y = npc2Data.container ? npc2Data.container.y : npc2Data.sprite.y
+      
+      midX = (npc1X + npc2X) / 2
+      midY = Math.min(npc1Y, npc2Y) - 80
+    }
+    
+    const conversationBubble = this.add.container(midX, midY)
+    
+    // Background
+    const bg = this.add.rectangle(0, 0, 400, 80, 0x000000, 0.9)
+    bg.setStrokeStyle(2, isPlayerConversation ? 0x00ffff : 0x00ff00) // Cyan for player, green for NPC
+    
+    // Text
+    const text = this.add.text(0, 0, conversation, {
+      fontSize: '11px',
+      color: '#ffffff',
+      fontFamily: 'Arial',
+      align: 'center',
+      wordWrap: { width: 380 }
+    })
+    text.setOrigin(0.5)
+    
+    conversationBubble.add([bg, text])
+    
+    // Animate entrance
+    conversationBubble.setScale(0.5)
+    this.tweens.add({
+      targets: conversationBubble,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 400,
+      ease: 'Back.easeOut'
+    })
+    
+    // Store reference for cleanup
+    if (isPlayerConversation) {
+      npc1Data.conversationBubble = conversationBubble
+    } else {
+      npc1Data.conversationBubble = conversationBubble
+      npc2Data.conversationBubble = conversationBubble
+    }
+  }
+
+  showAIConversation(npcData: any, conversation: string, isPlayerConversation: boolean, npc2Data?: any) {
+    // Show the AI-generated conversation
+    this.showConversationBubble(npcData, npc2Data, conversation, isPlayerConversation)
+    
+    // End conversation after some time
+    if (isPlayerConversation) {
+      this.time.delayedCall(8000, () => {
+        this.endPlayerConversation()
+      })
+    } else {
+      this.time.delayedCall(8000, () => {
+        this.endConversation(npcData.id, npc2Data?.id || '')
+      })
+    }
+  }
+
+  endPlayerConversation() {
+    console.log('Ending player conversation')
+    
+    if (this.playerConversationPartner) {
+      const npcData = this.npcData.get(this.playerConversationPartner)
+      if (npcData) {
+        // Clean up conversation bubble
+        if (npcData.conversationBubble) {
+          npcData.conversationBubble.destroy()
+          npcData.conversationBubble = null
+        }
+        
+        // Reset NPC state
+        npcData.handshakeState = 'idle'
+        npcData.conversationState = undefined
+      }
+    }
+    
+    // Reset player conversation state
+    this.exitConversationState()
+    
+    console.log('Player conversation ended')
+  }
+
+  endConversation(npc1Id: string, npc2Id: string) {
+    const npc1Data = this.npcData.get(npc1Id)
+    const npc2Data = this.npcData.get(npc2Id)
+    
+    if (!npc1Data || !npc2Data) return
+    
+    // Clean up conversation bubble
+    if (npc1Data.conversationBubble) {
+      npc1Data.conversationBubble.destroy()
+      npc1Data.conversationBubble = null
+    }
+    if (npc2Data.conversationBubble) {
+      npc2Data.conversationBubble = null // Don't destroy twice
+    }
+    
+    // Reset states
+    this.resetHandshakeState(npc1Id)
+    this.resetHandshakeState(npc2Id)
+    
+    console.log(`${npc1Data.name} and ${npc2Data.name} finished their conversation`)
+  }
+
+  resetHandshakeState(npcId: string) {
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
+    
+    npcData.handshakeState = 'idle'
+    npcData.handshakePartner = null
+    npcData.handshakeRequestTimer = 0
+  }
+
+
+
+  showNPCConversation(npc1Data: any, npc2Data: any, conversation: string) {
+    // Create conversation bubble between the two NPCs
+    // Use container positions if available, otherwise use sprite positions
+    const npc1X = npc1Data.container ? npc1Data.container.x : npc1Data.sprite.x
+    const npc1Y = npc1Data.container ? npc1Data.container.y : npc1Data.sprite.y
+    const npc2X = npc2Data.container ? npc2Data.container.x : npc2Data.sprite.x
+    const npc2Y = npc2Data.container ? npc2Data.container.y : npc2Data.sprite.y
+    
+    const midX = (npc1X + npc2X) / 2
+    const midY = Math.min(npc1Y, npc2Y) - 60
+    
+    const conversationBubble = this.add.container(midX, midY)
+    
+    // Background
+    const bg = this.add.rectangle(0, 0, 300, 40, 0x000000, 0.9)
+    bg.setStrokeStyle(2, 0x00ff00)
+    
+    // Text
+    const text = this.add.text(0, 0, conversation, {
+      fontSize: '12px',
+      color: '#ffffff',
+      fontFamily: 'Arial',
+      align: 'center',
+      wordWrap: { width: 280 }
+    })
+    text.setOrigin(0.5)
+    
+    conversationBubble.add([bg, text])
+    
+    // Animate the conversation bubble
+    conversationBubble.setScale(0)
+    this.tweens.add({
+      targets: conversationBubble,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 300,
+      ease: 'Back.easeOut'
+    })
+    
+    // Remove after 4 seconds
+    this.time.delayedCall(4000, () => {
+      this.tweens.add({
+        targets: conversationBubble,
+        scaleX: 0,
+        scaleY: 0,
+        duration: 200,
+        ease: 'Back.easeIn',
+        onComplete: () => {
+          conversationBubble.destroy()
+        }
+      })
+    })
+  }
+
+  createPersonalityNPCs() {
+    // Define NPC personalities with unique traits
+    const personalities = [
+      {
+        name: "Ruby the Warrior",
+        color: 0xff6b6b, // Red
+        personality: "You are Ruby, a fierce warrior. You're brave, direct, and always ready for battle. You speak with confidence and use military terms. You respect strength and courage.",
+        greeting: "Hail, traveler! I am Ruby, warrior of these lands. What brings you to my domain?"
+      },
+      {
+        name: "Azure the Scholar",
+        color: 0x4ecdc4, // Teal
+        personality: "You are Azure, a wise scholar. You're intelligent, curious, and speak in a formal, academic manner. You love learning and sharing knowledge.",
+        greeting: "Greetings, fellow seeker of knowledge. I am Azure, keeper of ancient wisdom. What mysteries shall we explore together?"
+      },
+      {
+        name: "Sage the Mystic",
+        color: 0x45b7d1, // Blue
+        personality: "You are Sage, a mystical fortune teller. You speak in riddles and metaphors, often predicting the future. You're mysterious and wise.",
+        greeting: "The stars whisper your name, traveler. I am Sage, reader of fate's tapestry. What destiny do you seek?"
+      },
+      {
+        name: "Forest the Gardener",
+        color: 0x96ceb4, // Green
+        personality: "You are Forest, a gentle gardener. You're peaceful, nurturing, and speak about nature and growth. You love plants and harmony.",
+        greeting: "Welcome to my garden, friend. I am Forest, tender of all growing things. How may nature's wisdom guide you?"
+      },
+      {
+        name: "Goldie the Merchant",
+        color: 0xfeca57, // Yellow
+        personality: "You are Goldie, a shrewd merchant. You're business-minded, persuasive, and always looking for deals. You speak about trade and profit.",
+        greeting: "Ah, a potential customer! I am Goldie, purveyor of fine goods. What treasures might interest you today?"
+      },
+      {
+        name: "Rose the Artist",
+        color: 0xff9ff3, // Pink
+        personality: "You are Rose, a passionate artist. You're creative, emotional, and speak about beauty and inspiration. You see the world through an artistic lens.",
+        greeting: "Welcome to my studio, dear soul. I am Rose, painter of dreams. What beauty shall we create together?"
+      },
+      {
+        name: "Storm the Sailor",
+        color: 0x54a0ff, // Light Blue
+        personality: "You are Storm, an experienced sailor. You're adventurous, weathered, and speak about the sea and distant lands. You tell tales of adventure.",
+        greeting: "Ahoy there, land lubber! I am Storm, captain of the seven seas. What adventures call to your heart?"
+      },
+      {
+        name: "Ember the Blacksmith",
+        color: 0xff7675, // Coral
+        personality: "You are Ember, a skilled blacksmith. You're strong, practical, and speak about craftsmanship and hard work. You forge tools and weapons.",
+        greeting: "Welcome to my forge, friend. I am Ember, master of metal and flame. What shall we craft together?"
+      },
+      {
+        name: "Luna the Night Owl",
+        color: 0x74b9ff, // Sky Blue
+        personality: "You are Luna, a nocturnal philosopher. You're contemplative, mysterious, and speak about the night sky and deep thoughts. You're most active at night.",
+        greeting: "The moon greets you, night wanderer. I am Luna, keeper of midnight secrets. What mysteries shall we ponder?"
+      },
+      {
+        name: "Violet the Noble",
+        color: 0xa29bfe, // Purple
+        personality: "You are Violet, a refined noble. You're elegant, sophisticated, and speak with proper etiquette. You value culture and refinement.",
+        greeting: "Good day, distinguished guest. I am Lady Violet of the noble house. How may I be of service to you?"
+      }
     ]
 
-    // Create 8-12 random NPCs
-    const numNPCs = Phaser.Math.Between(8, 12)
+    // Create NPCs with unique personalities
     
-    for (let i = 0; i < numNPCs; i++) {
+    for (let i = 0; i < personalities.length; i++) {
       // Find a valid spawn position that doesn't overlap with other NPCs or player
       const validPosition = this.findValidSpawnPosition()
       if (!validPosition) {
-        console.warn(`Could not find valid spawn position for NPC ${i}`)
+        console.warn(`Could not find valid spawn position for ${personalities[i].name}`)
         continue
       }
       
       const { x, y } = validPosition
-      const color = colors[Phaser.Math.Between(0, colors.length - 1)]
-      const size = Phaser.Math.Between(25, 40)
+      const personality = personalities[i]
       
-      const npc = this.add.rectangle(x, y, size, size, color)
+      // Create a container to hold both the NPC and its label
+      const npcContainer = this.add.container(x, y)
+      
+      // Create the NPC rectangle
+      const npc = this.add.rectangle(0, 0, 35, 35, personality.color)
       npc.setName(`npc_${i}`)
       npc.setInteractive()
-      npc.setStrokeStyle(2, 0x000000)
+      npc.setStrokeStyle(3, 0x000000)
 
       // Add hover effect
       npc.on('pointerover', () => {
         npc.setScale(1.2)
-        npc.setStrokeStyle(3, 0xffff00)
+        npc.setStrokeStyle(4, 0xffff00)
       })
 
       npc.on('pointerout', () => {
-        npc.setScale(1)
-        npc.setStrokeStyle(2, 0x000000)
+        npc.setScale(1.0)
+        npc.setStrokeStyle(3, 0x000000)
       })
 
-      // Add a simple label
-      const label = this.add.text(x, y - 25, `NPC ${i + 1}`, {
+      // Add name label
+      const label = this.add.text(0, -25, personality.name, {
         fontSize: '10px',
         color: '#ffffff',
         fontFamily: 'Arial',
         backgroundColor: 'rgba(0,0,0,0.7)',
-        padding: { x: 2, y: 1 }
+        padding: { x: 4, y: 2 }
       })
       label.setOrigin(0.5)
+      
+      // Add both NPC and label to the container
+      npcContainer.add([npc, label])
 
       this.npcs.set(`npc_${i}`, npc)
       
-      // Give random NPCs personality data too
-      const randomDescriptions = [
-        'mysterious stranger', 'friendly traveler', 'wise elder', 'cheerful merchant',
-        'serious guard', 'playful child', 'brave warrior', 'cautious scholar',
-        'energetic bard', 'calm monk', 'adventurous explorer', 'traditional craftsman'
-      ]
-      
-      const randomDescription = randomDescriptions[Phaser.Math.Between(0, randomDescriptions.length - 1)]
-      const randomTraits = this.generateRandomTraits()
-      
+      // Store NPC reference and personality data
       this.npcData.set(`npc_${i}`, {
         id: `npc_${i}`,
-        name: `NPC ${i + 1}`,
-        description: randomDescription,
-        personality: `A ${randomDescription} with a unique personality`,
-        traits: randomTraits,
-        dialogue: [`Hello! I'm a ${randomDescription}.`],
-        sprite: npc
+        name: personality.name,
+        description: personality.name,
+        personality: personality.personality,
+        greeting: personality.greeting,
+        color: personality.color,
+        dialogue: [personality.greeting],
+        sprite: npc,
+        container: npcContainer, // Store the container that holds both NPC and label
+        label: label, // Store the label with the NPC data
+        // Movement properties
+        moveSpeed: Phaser.Math.Between(20, 40), // Random speed for each NPC
+        moveDirection: { x: 0, y: 0 },
+        moveTimer: 0,
+        moveDuration: Phaser.Math.Between(2000, 5000), // How long to move in one direction
+        isMoving: false,
+        // Interaction properties
+        lastInteraction: 0,
+        interactionCooldown: Phaser.Math.Between(10000, 20000), // 10-20 seconds between interactions
+        // Handshake system properties
+        handshakeState: 'idle', // 'idle', 'requesting', 'requested', 'accepted', 'rejected', 'conversing'
+        handshakePartner: null,
+        handshakeRequestTimer: 0,
+        handshakeRequestDuration: 3000 // 3 seconds to respond to handshake
       })
+      
     }
+    
+    console.log(`Created ${personalities.length} NPCs with unique personalities`)
   }
 
   createNPC(id: string, description: string): Phaser.GameObjects.Rectangle {
@@ -227,8 +1175,11 @@ export function createGameScene(Phaser: any) {
     
     const { x, y } = validPosition
 
+    // Create a container to hold both the NPC and its label
+    const npcContainer = this.add.container(x, y)
+    
     // Create NPC sprite (simple colored rectangle)
-    const npc = this.add.rectangle(x, y, 35, 35, this.getNPCColor(description))
+    const npc = this.add.rectangle(0, 0, 35, 35, this.getNPCColor(description))
     npc.setName(id)
     npc.setInteractive()
     npc.setStrokeStyle(3, 0x00ff00) // Green border for custom NPCs
@@ -245,7 +1196,7 @@ export function createGameScene(Phaser: any) {
     })
 
     // Add name label
-    const nameLabel = this.add.text(x, y - 25, personality.name || this.getNPCName(description), {
+    const nameLabel = this.add.text(0, -25, personality.name || this.getNPCName(description), {
       fontSize: '10px',
       color: '#ffffff',
       fontFamily: 'Arial',
@@ -253,6 +1204,9 @@ export function createGameScene(Phaser: any) {
       padding: { x: 2, y: 1 }
     })
     nameLabel.setOrigin(0.5)
+    
+    // Add both NPC and label to the container
+    npcContainer.add([npc, nameLabel])
 
     // Store NPC reference and data
     this.npcs.set(id, npc)
@@ -261,9 +1215,12 @@ export function createGameScene(Phaser: any) {
       name: personality.name || this.getNPCName(description),
       description,
       personality: personality.description,
-      traits: personality.traits || [],
+      greeting: personality.greeting || `Hello! I'm ${personality.name || description}.`,
+      color: this.getNPCColor(description),
       dialogue: personality.initialDialogue || [],
-      sprite: npc
+      sprite: npc,
+      container: npcContainer, // Store the container that holds both NPC and label
+      label: nameLabel // Store the label with the NPC data
     })
 
     return this.npcData.get(id)
@@ -309,50 +1266,287 @@ export function createGameScene(Phaser: any) {
   }
 
   private checkNPCProximity() {
-    if (!this.player) return
+    if (!this.player) {
+      console.log('checkNPCProximity: No player found')
+      return
+    }
+
+    console.log(`checkNPCProximity: Player at (${this.player.x.toFixed(1)}, ${this.player.y.toFixed(1)}), checking ${this.npcs.size} NPCs`)
 
     this.npcs.forEach((npc, npcId) => {
+      const npcData = this.npcData.get(npcId)
+      if (!npcData) return
+      
+      // Get actual NPC position (container or individual)
+      const npcX = npcData.container ? npcData.container.x : npc.x
+      const npcY = npcData.container ? npcData.container.y : npc.y
+      
       const distance = Phaser.Math.Distance.Between(
         this.player!.x, 
         this.player!.y, 
-        npc.x, 
-        npc.y
+        npcX, 
+        npcY
       )
 
+      // Debug logging
+      if (distance <= this.proximityDistance + 20) { // Log when close
+        console.log(`Player near ${npcId}: distance=${distance.toFixed(1)}, proximityDistance=${this.proximityDistance}`)
+      }
+
       if (distance <= this.proximityDistance) {
-        // Player is close to NPC - show dialog only if not already chatting
-        if (this.activeChatNPC !== npcId) {
-          this.showNPCDialog(npcId, npc)
-        }
+        // Player is close to NPC
+        this.handlePlayerApproach(npcId, npc, distance)
       } else {
-        // Player is far from NPC - hide dialog but don't close active chat
-        this.hideNPCDialog(npcId)
-        
-        // Only close chat if we're not actively in chat input mode
-        if (this.activeChatNPC === npcId && !this.isInChatInputMode()) {
-          console.log('Player moved away from NPC, closing chat:', npcId)
-          this.closeChat(npcId)
-        } else if (this.activeChatNPC === npcId && this.isInChatInputMode()) {
-          console.log('Player moved away but actively chatting, keeping chat open:', npcId)
-        }
+        // Player is far from NPC
+        this.handlePlayerDistance(npcId, distance)
       }
     })
   }
 
+  private handlePlayerApproach(npcId: string, npc: Phaser.GameObjects.Rectangle, distance: number) {
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
+
+    // Handle different conversation states
+    switch (this.playerConversationState) {
+      case 'idle':
+        // Player is approaching an NPC for the first time
+        this.enterApproachState(npcId, npc, distance)
+        break
+        
+      case 'approaching':
+        // Player is still approaching the same NPC
+        if (this.playerConversationPartner === npcId) {
+          this.updateApproachState(npcId, npc, distance)
+        } else {
+          // Player switched to a different NPC
+          this.exitConversationState()
+          this.enterApproachState(npcId, npc, distance)
+        }
+        break
+        
+      case 'talking':
+        // Player is already in conversation
+        if (this.playerConversationPartner === npcId) {
+          // Still talking to the same NPC - maintain conversation
+          this.maintainConversationState(npcId, npc, distance)
+        } else {
+          // Player switched to a different NPC while talking
+          this.exitConversationState()
+          this.enterApproachState(npcId, npc, distance)
+        }
+        break
+        
+      case 'exiting':
+        // Player is in the process of exiting conversation
+        if (this.playerConversationPartner === npcId) {
+          // Player came back while exiting - cancel exit
+          this.cancelExitState()
+          this.enterApproachState(npcId, npc, distance)
+        } else {
+          // Player switched to different NPC while exiting
+          this.exitConversationState()
+          this.enterApproachState(npcId, npc, distance)
+        }
+        break
+    }
+  }
+
+  private handlePlayerDistance(npcId: string, distance: number) {
+    // Player moved away from NPC
+    if (this.playerConversationPartner === npcId) {
+      switch (this.playerConversationState) {
+        case 'approaching':
+          // Player moved away while approaching - cancel approach
+          this.exitConversationState()
+          break
+          
+        case 'talking':
+          // Player moved away while talking - start exit process
+          this.enterExitState()
+          break
+          
+        case 'exiting':
+          // Player is already exiting - continue exit process
+          this.updateExitState()
+          break
+      }
+    }
+    
+    // Hide dialog for this NPC
+    this.hideNPCDialog(npcId)
+  }
+
+  private enterApproachState(npcId: string, npc: Phaser.GameObjects.Rectangle, distance: number) {
+    console.log(`Entering approach state for ${npcId}`)
+    
+    this.playerConversationState = 'approaching'
+    this.playerConversationPartner = npcId
+    
+    // Show approach dialog
+    this.showNPCDialog(npcId, npc)
+    
+    // Set entry timer (optional - for delayed entry)
+    this.conversationEntryTimer = this.time.now + 500 // 500ms delay
+  }
+
+  private updateApproachState(npcId: string, npc: Phaser.GameObjects.Rectangle, distance: number) {
+    // Update approach dialog if needed
+    if (!this.npcDialogs.has(npcId)) {
+      this.showNPCDialog(npcId, npc)
+    }
+  }
+
+  private maintainConversationState(npcId: string, npc: Phaser.GameObjects.Rectangle, distance: number) {
+    // Maintain conversation state - ensure chat interface is still active
+    if (this.activeChatNPC !== npcId) {
+      // Restore chat interface if it was lost
+      this.startChatWithNPC(npcId)
+    }
+  }
+
+  private enterExitState() {
+    console.log('Entering exit state')
+    
+    this.playerConversationState = 'exiting'
+    this.conversationExitTimer = this.time.now + 2000 // 2 second exit delay
+    
+    // Show exit warning
+    if (this.playerConversationPartner) {
+      this.showExitWarning(this.playerConversationPartner)
+    }
+  }
+
+  private updateExitState() {
+    if (this.conversationExitTimer && this.time.now >= this.conversationExitTimer) {
+      // Exit timer expired - complete the exit
+      this.exitConversationState()
+    }
+  }
+
+  private cancelExitState() {
+    console.log('Canceling exit state')
+    
+    this.playerConversationState = 'approaching'
+    this.conversationExitTimer = undefined
+    
+    // Hide exit warning
+    if (this.playerConversationPartner) {
+      this.hideExitWarning(this.playerConversationPartner)
+    }
+  }
+
+  private exitConversationState() {
+    console.log('Exiting conversation state')
+    
+    // Close any active chat
+    if (this.activeChatNPC) {
+      this.closeChat(this.activeChatNPC)
+    }
+    
+    // Reset NPC state if we were talking to one
+    if (this.playerConversationPartner) {
+      const npcData = this.npcData.get(this.playerConversationPartner)
+      if (npcData) {
+        // Reset NPC conversation state
+        npcData.handshakeState = 'idle'
+        npcData.conversationState = undefined
+        npcData.conversationBubble = null
+        
+        // Clean up any conversation bubbles
+        if (npcData.conversationBubble) {
+          npcData.conversationBubble.destroy()
+          npcData.conversationBubble = null
+        }
+        
+        console.log(`Reset NPC ${this.playerConversationPartner} state to idle`)
+      }
+    }
+    
+    // Reset conversation state
+    this.playerConversationState = 'idle'
+    this.playerConversationPartner = undefined
+    this.conversationEntryTimer = undefined
+    this.conversationExitTimer = undefined
+    
+    // Hide all dialogs
+    this.npcDialogs.forEach((dialog, npcId) => {
+      this.hideNPCDialog(npcId)
+    })
+    
+    // Clear any exit warnings
+    this.npcDialogs.forEach((dialog, npcId) => {
+      if (npcId.includes('_exit_warning')) {
+        this.hideNPCDialog(npcId)
+      }
+    })
+    
+    console.log('Conversation state fully reset - player should be able to move')
+  }
+
+  private showExitWarning(npcId: string) {
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
+    
+    const npcX = npcData.container ? npcData.container.x : npcData.sprite.x
+    const npcY = npcData.container ? npcData.container.y : npcData.sprite.y
+    
+    const warningContainer = this.add.container(npcX, npcY - 160)
+    
+    const warningBg = this.add.rectangle(0, 0, 200, 25, 0x000000, 0.8)
+    warningBg.setStrokeStyle(2, 0xff6600) // Orange border for warning
+    
+    const warningText = this.add.text(0, 0, 'Moving away...', {
+      fontSize: '10px',
+      color: '#ff6600',
+      fontFamily: 'Arial',
+      align: 'center'
+    })
+    warningText.setOrigin(0.5)
+    
+    warningContainer.add([warningBg, warningText])
+    this.npcDialogs.set(`${npcId}_exit_warning`, warningContainer)
+  }
+
+  private hideExitWarning(npcId: string) {
+    const warningDialog = this.npcDialogs.get(`${npcId}_exit_warning`)
+    if (warningDialog) {
+      warningDialog.destroy()
+      this.npcDialogs.delete(`${npcId}_exit_warning`)
+    }
+  }
+
   private showNPCDialog(npcId: string, npc: Phaser.GameObjects.Rectangle) {
+    console.log(`showNPCDialog called for ${npcId}`)
+    
     // Don't create dialog if it already exists or if we're already chatting
-    if (this.npcDialogs.has(npcId) || this.activeChatNPC === npcId) return
+    if (this.npcDialogs.has(npcId) || this.activeChatNPC === npcId) {
+      console.log(`Dialog already exists or active chat for ${npcId}`)
+      return
+    }
+
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) {
+      console.log(`No npcData found for ${npcId}`)
+      return
+    }
+    
+    // Get actual NPC position (container or individual)
+    const npcX = npcData.container ? npcData.container.x : npc.x
+    const npcY = npcData.container ? npcData.container.y : npc.y
+
+    console.log(`Creating dialog for ${npcId} at position (${npcX}, ${npcY - 45})`)
 
     // Create dialog container
-    const dialogContainer = this.add.container(npc.x, npc.y - 60)
+    const dialogContainer = this.add.container(npcX, npcY - 45)
     
     // Create dialog background
-    const dialogBg = this.add.rectangle(0, 0, 120, 40, 0x000000, 0.8)
+    const dialogBg = this.add.rectangle(0, 0, 100, 30, 0x000000, 0.8)
     dialogBg.setStrokeStyle(2, 0xffffff)
     
     // Create dialog text
     const dialogText = this.add.text(0, 0, 'Press F to talk', {
-      fontSize: '12px',
+      fontSize: '10px',
       color: '#ffffff',
       fontFamily: 'Arial',
       align: 'center'
@@ -386,38 +1580,79 @@ export function createGameScene(Phaser: any) {
   }
 
   // Collision detection methods
-  private isPositionOccupied(x: number, y: number, excludeId?: string): boolean {
-    // Check collision with player
-    if (this.player) {
-      const distanceToPlayer = Phaser.Math.Distance.Between(x, y, this.player.x, this.player.y)
-      if (distanceToPlayer < this.minDistance) {
-        return true
+
+  private preventNPCCollisions() {
+    // Check all NPC pairs for collisions
+    const npcArray = Array.from(this.npcs.entries())
+    
+    for (let i = 0; i < npcArray.length; i++) {
+      for (let j = i + 1; j < npcArray.length; j++) {
+        const [npc1Id, npc1] = npcArray[i]
+        const [npc2Id, npc2] = npcArray[j]
+        
+        const npc1Data = this.npcData.get(npc1Id)
+        const npc2Data = this.npcData.get(npc2Id)
+        
+        if (!npc1Data || !npc2Data) continue
+        
+        // Get actual positions
+        const npc1X = npc1Data.container ? npc1Data.container.x : npc1.x
+        const npc1Y = npc1Data.container ? npc1Data.container.y : npc1.y
+        const npc2X = npc2Data.container ? npc2Data.container.x : npc2.x
+        const npc2Y = npc2Data.container ? npc2Data.container.y : npc2.y
+        
+        const distance = Phaser.Math.Distance.Between(npc1X, npc1Y, npc2X, npc2Y)
+        const requiredDistance = (this.npcCollisionRadius * 2) + this.collisionPadding
+        
+        if (distance < requiredDistance) {
+          // Calculate separation vector
+          const angle = Phaser.Math.Angle.Between(npc1X, npc1Y, npc2X, npc2Y)
+          const separationDistance = (requiredDistance - distance) / 2 + 1
+          
+          const pushX = Math.cos(angle) * separationDistance
+          const pushY = Math.sin(angle) * separationDistance
+          
+          // Move NPCs apart
+          const newNpc1X = npc1X - pushX
+          const newNpc1Y = npc1Y - pushY
+          const newNpc2X = npc2X + pushX
+          const newNpc2Y = npc2Y + pushY
+          
+          // Apply movement if positions are valid
+          if (this.isValidNPCPosition(newNpc1X, newNpc1Y, npc1Id)) {
+            if (npc1Data.container) {
+              npc1Data.container.x = newNpc1X
+              npc1Data.container.y = newNpc1Y
+            } else {
+              npc1.x = newNpc1X
+              npc1.y = newNpc1Y
+            }
+          }
+          
+          if (this.isValidNPCPosition(newNpc2X, newNpc2Y, npc2Id)) {
+            if (npc2Data.container) {
+              npc2Data.container.x = newNpc2X
+              npc2Data.container.y = newNpc2Y
+            } else {
+              npc2.x = newNpc2X
+              npc2.y = newNpc2Y
+            }
+          }
+        }
       }
     }
-
-    // Check collision with other NPCs
-    for (const [npcId, npc] of this.npcs) {
-      if (excludeId && npcId === excludeId) continue
-      
-      const distance = Phaser.Math.Distance.Between(x, y, npc.x, npc.y)
-      if (distance < this.minDistance) {
-        return true
-      }
-    }
-
-    return false
   }
 
-  private findValidSpawnPosition(maxAttempts: number = 50): { x: number; y: number } | null {
+  private findValidSpawnPosition(maxAttempts: number = 100): { x: number; y: number } | null {
     const gameWidth = this.cameras.main.width
     const gameHeight = this.cameras.main.height
-    const margin = 50 // Keep NPCs away from edges
+    const boundsPadding = this.npcCollisionRadius + this.collisionPadding
 
     for (let i = 0; i < maxAttempts; i++) {
-      const x = Phaser.Math.Between(margin, gameWidth - margin)
-      const y = Phaser.Math.Between(margin, gameHeight - margin)
+      const x = Phaser.Math.Between(boundsPadding, gameWidth - boundsPadding)
+      const y = Phaser.Math.Between(boundsPadding, gameHeight - boundsPadding)
       
-      if (!this.isPositionOccupied(x, y)) {
+      if (this.isValidNPCPosition(x, y, '')) {
         return { x, y }
       }
     }
@@ -430,24 +1665,38 @@ export function createGameScene(Phaser: any) {
 
     // Check if player is colliding with any NPC
     for (const [npcId, npc] of this.npcs) {
+      const npcData = this.npcData.get(npcId)
+      if (!npcData) continue
+      
+      // Get actual NPC position (container or individual)
+      const npcX = npcData.container ? npcData.container.x : npc.x
+      const npcY = npcData.container ? npcData.container.y : npc.y
+      
       const distance = Phaser.Math.Distance.Between(
         this.player.x, 
         this.player.y, 
-        npc.x, 
-        npc.y
+        npcX, 
+        npcY
       )
 
-      if (distance < this.minDistance) {
-        // Push player away from NPC
-        const angle = Phaser.Math.Angle.Between(npc.x, npc.y, this.player.x, this.player.y)
-        const pushDistance = this.minDistance - distance + 5
+      const requiredDistance = this.playerCollisionRadius + this.npcCollisionRadius + this.collisionPadding
+      
+      if (distance < requiredDistance) {
+        // Calculate push direction and distance
+        const angle = Phaser.Math.Angle.Between(npcX, npcY, this.player.x, this.player.y)
+        const pushDistance = requiredDistance - distance + 2 // Extra 2 pixels for smooth separation
         
-        this.player.x += Math.cos(angle) * pushDistance
-        this.player.y += Math.sin(angle) * pushDistance
+        // Apply smooth push
+        const pushX = Math.cos(angle) * pushDistance
+        const pushY = Math.sin(angle) * pushDistance
         
-        // Keep player within bounds
-        this.player.x = Phaser.Math.Clamp(this.player.x, 15, this.cameras.main.width - 15)
-        this.player.y = Phaser.Math.Clamp(this.player.y, 15, this.cameras.main.height - 15)
+        this.player.x += pushX
+        this.player.y += pushY
+        
+        // Keep player within bounds with proper padding
+        const playerBoundsPadding = this.playerCollisionRadius + this.collisionPadding
+        this.player.x = Phaser.Math.Clamp(this.player.x, playerBoundsPadding, this.cameras.main.width - playerBoundsPadding)
+        this.player.y = Phaser.Math.Clamp(this.player.y, playerBoundsPadding, this.cameras.main.height - playerBoundsPadding)
       }
     }
   }
@@ -455,32 +1704,358 @@ export function createGameScene(Phaser: any) {
   private interactWithNearbyNPC() {
     if (!this.player) return
     
-    // Don't interact if we're actively chatting
-    if (this.isInChatInputMode() || this.isActivelyTypingInChat()) {
-      console.log('Cannot interact with NPC while actively chatting')
-      return
+    // Handle interaction based on current conversation state
+    switch (this.playerConversationState) {
+      case 'idle':
+        // No interaction possible in idle state
+        console.log('Cannot interact - player is in idle state')
+        return
+        
+      case 'approaching':
+        // Player can start conversation when approaching
+        if (this.playerConversationPartner) {
+          this.startPlayerConversation(this.playerConversationPartner, this.npcs.get(this.playerConversationPartner)!)
+        }
+        break
+        
+      case 'talking':
+        // Player is already in conversation - no new interaction
+        console.log('Already in conversation with', this.playerConversationPartner)
+        return
+        
+      case 'exiting':
+        // Player can cancel exit and return to conversation
+        if (this.playerConversationPartner) {
+          this.cancelExitState()
+          this.startPlayerConversation(this.playerConversationPartner, this.npcs.get(this.playerConversationPartner)!)
+        }
+        break
     }
+  }
 
-    // Find the closest NPC within interaction range
-    let closestNPC: { id: string; npc: Phaser.GameObjects.Rectangle; distance: number } | null = null
+  startPlayerConversation(npcId: string, npc: Phaser.GameObjects.Rectangle) {
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
 
-    this.npcs.forEach((npc, npcId) => {
-      const distance = Phaser.Math.Distance.Between(
-        this.player!.x, 
-        this.player!.y, 
-        npc.x, 
-        npc.y
-      )
+    console.log(`Starting conversation with ${npcData.name}`)
 
-      if (distance <= this.proximityDistance) {
-        if (!closestNPC || distance < closestNPC.distance) {
-          closestNPC = { id: npcId, npc, distance }
+    // Transition to talking state
+    this.playerConversationState = 'talking'
+    this.playerConversationPartner = npcId
+    npcData.handshakeState = 'conversing'
+
+    // Hide approach dialog
+    this.hideNPCDialog(npcId)
+
+    // Start message-by-message conversation with player
+    this.startPlayerMessageByMessageConversation(npcData)
+
+    console.log(`Player conversation started with ${npcData.name}`)
+  }
+
+  startPlayerMessageByMessageConversation(npcData: any) {
+    // Initialize conversation state for NPC
+    npcData.conversationState = {
+      partner: 'player',
+      messageCount: 0,
+      maxMessages: Phaser.Math.Between(3, 5), // 3-5 message exchanges
+      conversationHistory: []
+    }
+    
+    // Start with an intro message from the NPC
+    this.sendPlayerConversationMessage(npcData, true)
+    
+    // Also start the chat interface for the player
+    this.startChatWithNPC(npcData.id)
+  }
+
+  async sendPlayerConversationMessage(npcData: any, isFirstMessage: boolean = false) {
+    try {
+      if (isFirstMessage) {
+        // Use predefined intro messages for the first message
+        const introMessages = this.getPlayerIntroMessages(npcData)
+        const selectedIntro = introMessages[Phaser.Math.Between(0, introMessages.length - 1)]
+        
+        // Show the intro message immediately
+        this.showPlayerConversationMessage(npcData, selectedIntro)
+        
+        // Add to conversation history
+        npcData.conversationState.conversationHistory.push(`${npcData.name}: "${selectedIntro}"`)
+        
+        // Wait for player response (this will be handled by the chat system)
+        // The conversation will continue when the player sends a message
+      } else {
+        // Generate AI response based on conversation history
+        const history = npcData.conversationState.conversationHistory.slice(-4).join('\n') // Last 4 messages for context
+        
+        const prompt = `Generate a natural response for ${npcData.name} in this conversation with the player. 
+
+${npcData.name} is a ${npcData.description} with personality: ${npcData.personality}
+
+Conversation so far:
+${history}
+
+Generate a single, natural response that fits ${npcData.name}'s personality and continues the conversation naturally. Keep it conversational and 1-2 sentences maximum. Just return the response text, nothing else.`
+
+        const geminiService = new GeminiService()
+        const response = await geminiService.generateDialogue(prompt, [], '')
+        
+        // Show the AI-generated response
+        this.showPlayerConversationMessage(npcData, response.trim())
+        
+        // Add to conversation history
+        const message = `${npcData.name}: "${response.trim()}"`
+        npcData.conversationState.conversationHistory.push(message)
+        
+        // Check if conversation should continue
+        npcData.conversationState.messageCount++
+        
+        if (npcData.conversationState.messageCount >= npcData.conversationState.maxMessages) {
+          // End conversation
+          this.time.delayedCall(3000, () => {
+            this.endPlayerConversation()
+          })
         }
       }
-    })
+    } catch (error) {
+      console.error('Error generating player conversation message:', error)
+      // End conversation gracefully if AI fails
+      this.endPlayerConversation()
+    }
+  }
 
-    if (closestNPC) {
-      this.onNPCInteraction(closestNPC.id, closestNPC.npc)
+  getPlayerIntroMessages(npcData: any): string[] {
+    // Predefined intro messages for player conversations
+    const personality = npcData.personality.toLowerCase()
+    
+    if (personality.includes('warrior')) {
+      return [
+        "Greetings, traveler! What brings you to these lands?",
+        "Well met, stranger. Are you here to test your mettle?",
+        "Ah, a new face! What adventures have you seen?",
+        "Welcome, friend. The path ahead is dangerous."
+      ]
+    } else if (personality.includes('scholar')) {
+      return [
+        "Ah, a seeker of knowledge! What mysteries interest you?",
+        "Greetings, fellow learner. What wisdom do you seek?",
+        "Welcome, curious one. I have much to share.",
+        "Ah, another mind eager to explore! What shall we discover?"
+      ]
+    } else if (personality.includes('mystic')) {
+      return [
+        "The stars whisper of your arrival, traveler...",
+        "Greetings, seeker. The cosmic energies swirl around you.",
+        "Ah, one touched by destiny. What do the fates hold?",
+        "Welcome, child of the universe. The mysteries await."
+      ]
+    } else if (personality.includes('merchant')) {
+      return [
+        "Welcome, customer! What can I interest you in today?",
+        "Ah, a potential buyer! I have the finest wares.",
+        "Greetings, friend! Business is good, I hope?",
+        "Welcome to my shop! What treasures do you seek?"
+      ]
+    } else if (personality.includes('gardener')) {
+      return [
+        "Welcome, friend! How lovely to see you in my garden.",
+        "Greetings, nature lover! The flowers bloom for you.",
+        "Ah, a kindred spirit! What grows in your heart?",
+        "Welcome, friend of the earth. Nature smiles upon us."
+      ]
+    } else if (personality.includes('artist')) {
+      return [
+        "Welcome, fellow creator! What beauty do you bring?",
+        "Greetings, kindred soul! Art flows through everything.",
+        "Ah, another artist! What masterpiece are you crafting?",
+        "Welcome, friend! The world needs more beauty."
+      ]
+    } else if (personality.includes('sailor')) {
+      return [
+        "Ahoy there, landlubber! What winds bring you here?",
+        "Welcome, friend! The seas have many tales to tell.",
+        "Greetings, fellow adventurer! Ready for the high seas?",
+        "Ahoy! What adventures await us on the horizon?"
+      ]
+    } else if (personality.includes('blacksmith')) {
+      return [
+        "Welcome, friend! Need anything forged today?",
+        "Greetings, traveler! The forge burns bright.",
+        "Ah, a customer! What steel do you need?",
+        "Welcome to my forge! What shall we create together?"
+      ]
+    } else if (personality.includes('noble')) {
+      return [
+        "Greetings, traveler. I trust you are well?",
+        "Welcome, friend. What brings you to our lands?",
+        "Ah, a distinguished visitor! How may I assist you?",
+        "Greetings, kind soul. Your presence honors us."
+      ]
+    } else {
+      return [
+        "Hello there, traveler! How are you?",
+        "Greetings, friend! What brings you here?",
+        "Welcome, stranger! Nice to meet you.",
+        "Hello! What can I do for you today?"
+      ]
+    }
+  }
+
+  showPlayerConversationMessage(npcData: any, message: string) {
+    // Create or update conversation bubble for player conversation
+    const npcX = npcData.container ? npcData.container.x : npcData.sprite.x
+    const npcY = npcData.container ? npcData.container.y : npcData.sprite.y
+    const playerX = this.player?.x || 0
+    const playerY = this.player?.y || 0
+    
+    const midX = (npcX + playerX) / 2
+    const midY = Math.min(npcY, playerY) - 60
+    
+    // Destroy existing conversation bubble if it exists
+    if (npcData.conversationBubble) {
+      npcData.conversationBubble.destroy()
+    }
+    
+    const conversationBubble = this.add.container(midX, midY)
+    
+    // Background
+    const bg = this.add.rectangle(0, 0, 400, 60, 0x000000, 0.9)
+    bg.setStrokeStyle(2, 0x00ffff) // Cyan border for player conversations
+    
+    // Text
+    const text = this.add.text(0, 0, message, {
+      fontSize: '12px',
+      color: '#ffffff',
+      fontFamily: 'Arial',
+      wordWrap: { width: 380, useAdvancedWrap: true },
+      align: 'center'
+    })
+    text.setOrigin(0.5)
+    
+    conversationBubble.add([bg, text])
+    
+    // Store reference for cleanup
+    npcData.conversationBubble = conversationBubble
+  }
+
+  async continuePlayerConversation(npcData: any) {
+    try {
+      // Generate AI response based on conversation history
+      const history = npcData.conversationState.conversationHistory.slice(-4).join('\n') // Last 4 messages for context
+      
+      const prompt = `Generate a natural response for ${npcData.name} in this conversation with the player. 
+
+${npcData.name} is a ${npcData.description} with personality: ${npcData.personality}
+
+Conversation so far:
+${history}
+
+Generate a single, natural response that fits ${npcData.name}'s personality and continues the conversation naturally. Keep it conversational and 1-2 sentences maximum. Just return the response text, nothing else.`
+
+      const geminiService = new GeminiService()
+      const response = await geminiService.generateDialogue(prompt, [], '')
+      
+      // Hide typing indicator
+      this.hideNPCDialog(`${npcData.id}_typing`)
+      
+      // Show the AI-generated response
+      this.showPlayerConversationMessage(npcData, response.trim())
+      
+      // Add to conversation history
+      const message = `${npcData.name}: "${response.trim()}"`
+      npcData.conversationState.conversationHistory.push(message)
+      
+      // Check if conversation should continue
+      npcData.conversationState.messageCount++
+      
+      if (npcData.conversationState.messageCount >= npcData.conversationState.maxMessages) {
+        // End conversation after a delay
+        this.time.delayedCall(3000, () => {
+          this.endPlayerConversation()
+        })
+      }
+    } catch (error) {
+      console.error('Error generating player conversation response:', error)
+      // Hide typing indicator and end conversation gracefully
+      this.hideNPCDialog(`${npcData.id}_typing`)
+      this.endPlayerConversation()
+    }
+  }
+
+  async generateAIConversation(npcData: any, isPlayerConversation: boolean = false, npc2Data?: any) {
+    try {
+      // Create conversation context
+      const conversationHistory = npcData.dialogue ? npcData.dialogue.slice(-6) : []
+      const historyText = conversationHistory.join('\n')
+      
+      let prompt: string
+      if (isPlayerConversation) {
+        prompt = `You are ${npcData.name}. ${npcData.personality}
+
+Generate a natural 3-4 sentence conversation between you and a player character. Make it engaging and in character. Each sentence should be on a new line.
+
+Previous conversation history: ${historyText}
+
+Generate a conversation that feels natural and fits your personality.`
+      } else {
+        // For NPC-to-NPC conversations
+        const npc2Name = npc2Data ? npc2Data.name : 'another NPC'
+        const npc2Personality = npc2Data ? npc2Data.personality : 'a friendly character'
+        
+        prompt = `You are ${npcData.name}. ${npcData.personality}
+
+You are having a conversation with ${npc2Name}, who is ${npc2Personality}.
+
+Generate a natural 3-4 sentence conversation between you and ${npc2Name}. Make it engaging and in character. Each sentence should be on a new line.
+
+Format: ${npcData.name}: "your dialogue here"
+${npc2Name}: "their response here"
+${npcData.name}: "your next line"
+${npc2Name}: "their final response"
+
+Make it feel natural and fit both personalities.`
+      }
+
+      // Call Gemini API
+      if (this.onNPCInteractionCallback) {
+        this.onNPCInteractionCallback({
+          ...npcData,
+          action: 'generateConversation',
+          prompt: prompt,
+          isPlayerConversation: isPlayerConversation,
+          npc2Data: npc2Data
+        })
+      } else {
+        // Fallback to direct API call
+        await this.handleDirectGeminiConversation(npcData, prompt, isPlayerConversation, npc2Data)
+      }
+    } catch (error) {
+      console.error('Error generating AI conversation:', error)
+      // If AI fails, just end the conversation gracefully without showing hardcoded text
+      if (isPlayerConversation) {
+        this.endPlayerConversation()
+      } else {
+        this.endConversation(npcData.id, npc2Data?.id || '')
+      }
+    }
+  }
+
+  async handleDirectGeminiConversation(npcData: any, prompt: string, isPlayerConversation: boolean, npc2Data?: any) {
+    // Direct Gemini API call for conversations
+    try {
+      const geminiService = new GeminiService()
+      const response = await geminiService.generateDialogue(prompt, [], '')
+      
+      // Show the AI-generated conversation
+      this.showAIConversation(npcData, response, isPlayerConversation, npc2Data)
+    } catch (error) {
+      console.error('Error generating AI conversation:', error)
+      // If AI fails, just end the conversation gracefully without showing hardcoded text
+      if (isPlayerConversation) {
+        this.endPlayerConversation()
+      } else {
+        this.endConversation(npcData.id, npc2Data?.id || '')
+      }
     }
   }
 
@@ -626,24 +2201,56 @@ export function createGameScene(Phaser: any) {
   }
 
   private handleGlobalKeyboardEvent(event: KeyboardEvent) {
-    // If we're in chat input mode, let the chat handler deal with it
-    if (this.isInChatInputMode()) {
-      return // Chat input handler will deal with all keys
+    // Handle ESC key for conversation exit (works in all modes)
+    if (event.key === 'Escape' || event.key === 'Esc') {
+      this.handleEscapeKey(event)
+      return
     }
     
-    // Handle global keys when not in chat input mode
-    if (event.key === 'Escape' || event.key === 'Esc') {
-      if (this.activeChatNPC) {
-        console.log('Global ESC key pressed - closing chat for NPC:', this.activeChatNPC)
-        event.preventDefault()
-        this.closeChat(this.activeChatNPC)
-      }
-    } else if (event.code === 'Space') {
+    // If we're in chat input mode, let the chat handler deal with other keys
+    if (this.isInChatInputMode()) {
+      return // Chat input handler will deal with all other keys
+    }
+    
+    // Handle other global keys when not in chat input mode
+    if (event.code === 'Space') {
       if (this.activeChatNPC) {
         console.log('SPACE key pressed to start chat with NPC:', this.activeChatNPC)
         event.preventDefault()
         this.startChatWithNPC(this.activeChatNPC)
       }
+    }
+  }
+
+  private handleEscapeKey(event: KeyboardEvent) {
+    console.log('ESC key pressed - current conversation state:', this.playerConversationState)
+    
+    switch (this.playerConversationState) {
+      case 'idle':
+        // No conversation to exit
+        console.log('ESC pressed but no active conversation')
+        break
+        
+      case 'approaching':
+        // Exit approach state
+        console.log('ESC pressed - exiting approach state')
+        event.preventDefault()
+        this.exitConversationState()
+        break
+        
+      case 'talking':
+        // Exit conversation
+        console.log('ESC pressed - exiting conversation with', this.playerConversationPartner)
+        event.preventDefault()
+        this.exitConversationState()
+        break
+        
+      case 'exiting':
+        // Already exiting - complete the exit
+        console.log('ESC pressed - completing exit')
+        event.preventDefault()
+        this.exitConversationState()
+        break
     }
   }
 
@@ -698,26 +2305,31 @@ export function createGameScene(Phaser: any) {
       return
     }
 
+    // Get actual NPC position (container or individual)
+    const npcX = npcData.container ? npcData.container.x : npc.x
+    const npcY = npcData.container ? npcData.container.y : npc.y
+    
     // Create chat input container
-    const chatContainer = this.add.container(npc.x, npc.y - 100)
-    console.log('Created chat container at:', npc.x, npc.y - 100)
+    const chatContainer = this.add.container(npcX, npcY - 80)
+    console.log('Created chat container at:', npcX, npcY - 80)
     
     // Create input background
     const inputBg = this.add.rectangle(0, 0, 250, 40, 0x000000, 0.9)
     inputBg.setStrokeStyle(2, 0x00ff00)
     
     // Create input text (placeholder)
-    const inputText = this.add.text(0, 0, 'Type your message...', {
+    const inputText = this.add.text(-100, 0, 'Type your message...', {
       fontSize: '12px',
       color: '#888888',
       fontFamily: 'Arial',
-      align: 'center'
+      align: 'left'
     })
-    inputText.setOrigin(0.5)
+    inputText.setOrigin(0, 0.5)
     
-    // Create cursor
-    const cursor = this.add.rectangle(0, 0, 2, 16, 0x00ff00)
-    cursor.setOrigin(0.5)
+    // Create cursor positioned at the start
+    const cursor = this.add.rectangle(-100, 0, 2, 14, 0x00ff00)
+    cursor.setOrigin(0, 0.5)
+    cursor.setVisible(false) // Start hidden until user types
     
     // Add blinking cursor animation
     this.tweens.add({
@@ -767,8 +2379,8 @@ export function createGameScene(Phaser: any) {
         } else if (event.key === 'Backspace') {
           chatInputManager.handleBackspace()
         } else if (event.key === 'Escape' || event.key === 'Esc') {
-          console.log('ESC key pressed - closing chat for NPC:', npcId)
-          this.closeChat(npcId)
+          console.log('ESC key pressed in chat - exiting conversation for NPC:', npcId)
+          this.exitConversationState()
         } else if (event.key === ' ') {
           chatInputManager.addCharacter(' ')
         } else if (this.isValidInputCharacter(event.key)) {
@@ -795,15 +2407,22 @@ export function createGameScene(Phaser: any) {
         chatInputManager.cursorPosition = 0
         chatInputManager.inputText.setText('Type your message...')
         chatInputManager.inputText.setColor('#888888')
+        chatInputManager.cursor.setVisible(false)
       },
       
       updateDisplay: () => {
         if (chatInputManager.currentText.length === 0) {
           chatInputManager.inputText.setText('Type your message...')
           chatInputManager.inputText.setColor('#888888')
+          chatInputManager.cursor.setVisible(false)
         } else {
           chatInputManager.inputText.setText(chatInputManager.currentText)
           chatInputManager.inputText.setColor('#ffffff')
+          chatInputManager.cursor.setVisible(true)
+          
+          // Position cursor at the end of the text
+          const textWidth = chatInputManager.inputText.width
+          chatInputManager.cursor.x = -100 + textWidth + 2
         }
       }
     }
@@ -827,12 +2446,19 @@ export function createGameScene(Phaser: any) {
   private showChatLockIndicator(npcId: string) {
     const npc = this.npcs.get(npcId)
     if (!npc) return
+    
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
 
     // Remove existing lock indicator
     this.hideNPCDialog(`${npcId}_lock`)
     
+    // Get actual NPC position (container or individual)
+    const npcX = npcData.container ? npcData.container.x : npc.x
+    const npcY = npcData.container ? npcData.container.y : npc.y
+    
     // Create lock indicator
-    const lockContainer = this.add.container(npc.x, npc.y - 180)
+    const lockContainer = this.add.container(npcX, npcY - 180)
     
     const lockBg = this.add.rectangle(0, 0, 250, 25, 0x000000, 0.8)
     lockBg.setStrokeStyle(2, 0x00ff00)
@@ -857,11 +2483,16 @@ export function createGameScene(Phaser: any) {
     const npcData = this.npcData.get(npcId)
     if (!npcData) return
     
-    // Add user message to NPC's dialogue history
-    if (!npcData.dialogue) {
-      npcData.dialogue = []
+    // Add user message to conversation history if using new system
+    if (npcData.conversationState) {
+      npcData.conversationState.conversationHistory.push(`Player: "${message}"`)
+    } else {
+      // Fallback to old system
+      if (!npcData.dialogue) {
+        npcData.dialogue = []
+      }
+      npcData.dialogue.push(`User: ${message}`)
     }
-    npcData.dialogue.push(`User: ${message}`)
     
     // Auto-save conversations
     this.saveConversationsToStorage()
@@ -869,26 +2500,39 @@ export function createGameScene(Phaser: any) {
     // Show "NPC is typing..." message
     this.showTypingIndicator(npcId)
     
-    // Always use direct Gemini API call for now to ensure it works
-    console.log('Using direct Gemini API call for message:', message, 'to NPC:', npcId)
-    this.handleDirectGeminiCall(npcId, message, npcData)
-    
-    // Also try the callback if it's available (for future use)
-    if (this.onNPCInteractionCallback) {
-      console.log('Callback is also available, but using direct call for reliability')
-      // this.onNPCInteractionCallback({ ...npcData, action: 'sendMessage', message })
+    // Use the new message-by-message system if available
+    if (npcData.conversationState) {
+      // Continue the conversation with AI response
+      this.continuePlayerConversation(npcData)
+    } else {
+      // Fallback to old system
+      console.log('Using direct Gemini API call for message:', message, 'to NPC:', npcId)
+      this.handleDirectGeminiCall(npcId, message, npcData)
+      
+      // Also try the callback if it's available (for future use)
+      if (this.onNPCInteractionCallback) {
+        console.log('Callback is also available, but using direct call for reliability')
+        // this.onNPCInteractionCallback({ ...npcData, action: 'sendMessage', message })
+      }
     }
   }
 
   private showTypingIndicator(npcId: string) {
     const npc = this.npcs.get(npcId)
     if (!npc) return
+    
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
 
     // Remove existing typing indicator
     this.hideNPCDialog(`${npcId}_typing`)
     
+    // Get actual NPC position (container or individual)
+    const npcX = npcData.container ? npcData.container.x : npc.x
+    const npcY = npcData.container ? npcData.container.y : npc.y
+    
     // Create typing indicator
-    const typingContainer = this.add.container(npc.x, npc.y - 140)
+    const typingContainer = this.add.container(npcX, npcY - 140)
     
     const typingBg = this.add.rectangle(0, 0, 200, 30, 0x000000, 0.8)
     typingBg.setStrokeStyle(2, 0xffff00)
@@ -957,12 +2601,19 @@ export function createGameScene(Phaser: any) {
   private showAIResponse(npcId: string, response: string) {
     const npc = this.npcs.get(npcId)
     if (!npc) return
+    
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
 
     // Remove existing response
     this.hideNPCDialog(`${npcId}_response`)
     
+    // Get actual NPC position (container or individual)
+    const npcX = npcData.container ? npcData.container.x : npc.x
+    const npcY = npcData.container ? npcData.container.y : npc.y
+    
     // Create response container
-    const responseContainer = this.add.container(npc.x, npc.y - 140)
+    const responseContainer = this.add.container(npcX, npcY - 140)
     
     const responseBg = this.add.rectangle(0, 0, 300, 60, 0x000000, 0.9)
     responseBg.setStrokeStyle(2, 0x00ff00)
@@ -1105,8 +2756,8 @@ export function createGameScene(Phaser: any) {
       }
       console.log('API key is available')
       
-      // Create personality context from the NPC's description and traits
-      const personalityContext = `You are a ${npcData.description}. Your personality traits are: ${npcData.traits.join(', ')}. ${npcData.personality}. Respond in character as this NPC would. Keep responses conversational and 1-2 sentences.`
+      // Create personality context from the NPC's personality
+      const personalityContext = `${npcData.personality}. Respond in character as this NPC would. Keep responses conversational and 1-2 sentences.`
       
       // Get conversation history for context
       const conversationHistory = npcData.dialogue ? npcData.dialogue.slice(-6) : []
@@ -1165,8 +2816,12 @@ export function createGameScene(Phaser: any) {
     // Set this as the active chat NPC
     this.activeChatNPC = npcId
     
+    // Get actual NPC position (container or individual)
+    const npcX = npcData.container ? npcData.container.x : npc.x
+    const npcY = npcData.container ? npcData.container.y : npc.y
+    
     // Create dialog container
-    const dialogContainer = this.add.container(npc.x, npc.y - 120)
+    const dialogContainer = this.add.container(npcX, npcY - 120)
     
     // Create dialog background
     const dialogBg = this.add.rectangle(0, 0, 300, 80, 0x000000, 0.9)
@@ -1224,9 +2879,16 @@ export function createGameScene(Phaser: any) {
     if (existingDialog) {
       existingDialog.destroy()
     }
+    
+    const npcData = this.npcData.get(npcId)
+    if (!npcData) return
+    
+    // Get actual NPC position (container or individual)
+    const npcX = npcData.container ? npcData.container.x : npc.x
+    const npcY = npcData.container ? npcData.container.y : npc.y
 
     // Create interaction dialog container
-    const dialogContainer = this.add.container(npc.x, npc.y - 100)
+    const dialogContainer = this.add.container(npcX, npcY - 100)
     
     // Create dialog background (larger for interaction)
     const dialogBg = this.add.rectangle(0, 0, 200, 60, 0x000000, 0.9)
